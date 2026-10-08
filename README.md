@@ -4,7 +4,25 @@
 
 输入 `https://weixin.qq.com/sph/...` 分享链接，获取视频信息、预览地址与媒体下载地址，或直接将视频保存到本地。
 
-> 本 README 描述项目的目标产品形态。
+仓库提供共享解析核心、独立 Skill 包、Docker / Worker API 和 Manifest V3 扩展。安装方式见下文；首次真实视频解析与下载的验收进度见 [产品目标 #1](https://github.com/MC0571/weixin-channels-video/issues/1)。
+
+## 构建与安装
+
+开发环境需要 Node.js 24+。解析核心和 Node 服务没有运行时 npm 依赖；构建使用 esbuild，Worker 使用官方 Wrangler。
+
+```sh
+npm ci
+npm test
+npm run build
+```
+
+产物：
+
+- `dist/weixin-channels-video/`：可单独复制安装的 Skill，包含本地 CLI、Python helper 和内置浏览器脚本，已带入共享核心。
+- `dist/extension/`：在 `chrome://extensions` 开启开发者模式后，通过“加载已解压的扩展程序”选择此目录。
+- `npm run worker:build`：单独构建 Worker 到 `dist/worker/`；这是本地打包，不会部署。
+
+Skill 包放到宿主的技能目录。例如 Codex 的 `~/.codex/skills/weixin-channels-video/`；已存在同名 Skill 时先检查内容，避免覆盖。Chrome 扩展点击工具栏图标后在独立标签页打开，关闭页面不会取消 Chrome 已启动的下载。
 
 ## 三种使用入口
 
@@ -49,6 +67,24 @@ Skill 携带共享解析代码，支持两种执行方式：
 
 本地脚本方式由 Node.js 执行共享解析代码，Python 辅助脚本负责读取 Chrome Cookie。macOS 钥匙串等系统授权由用户完成。日常使用无需手动复制 Cookie，无需 Docker、远程解析服务或 Codex Chrome 插件。
 
+macOS Chrome 路线可直接运行：
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r dist/weixin-channels-video/requirements.txt
+node dist/weixin-channels-video/scripts/cli.mjs list-profiles
+node dist/weixin-channels-video/scripts/cli.mjs check-login --profile 'Chrome 中显示的 profile 名称'
+node dist/weixin-channels-video/scripts/cli.mjs download \
+  --profile 'Chrome 中显示的 profile 名称' \
+  --url 'https://weixin.qq.com/sph/你的分享链接' \
+  --output "$HOME/Downloads/视频.mp4"
+```
+
+依赖装到自己的 Python 环境即可，安装后的 Skill 包无需仓库或 npm 构建工具。多个 profile 时必须选择一个；可以使用列出的目录名或显示名。保存目录需已存在，目标文件已存在时返回错误并保留原文件，失败会清理本次临时文件。
+
+Codex App 内置浏览器适配使用 `scripts/browser.js` 中的同一核心，通过两站各自标签页的 CDP 发起同源请求，再通过宿主的媒体下载能力取得本地文件。具体调用见包内 `SKILL.md`。宿主必须允许这两个来源、执行共享脚本并保存文件，才可将内置模式视为可用；当前完整内置链路仍待首次实测，[#5](https://github.com/MC0571/weixin-channels-video/issues/5) 跟踪此项。
+
 Cookie 留在所选浏览器或本地进程中，不进入 AI 对话、日志或解析结果。登录失效时，提示用户在对应浏览器中重新登录。
 
 ### 自部署解析 API
@@ -72,6 +108,50 @@ Content-Type: application/json
 
 返回统一的视频信息，包括标题、作者、封面、预览地址和媒体下载地址。调用者使用媒体地址自行下载；解析服务不承担视频文件存储。
 
+Docker 在根目录创建仅自己可读的 `.env`，填入 `API_TOKEN` 与 `YUANBAO_COOKIE`，再运行：
+
+```sh
+chmod 600 .env
+docker compose up --build -d
+```
+
+`.env` 格式（示例值需要替换，真实凭据不可提交）：
+
+```dotenv
+API_TOKEN=替换为随机的服务访问凭据
+YUANBAO_COOKIE="替换为部署者自己的元宝Cookie"
+```
+
+服务默认监听 3000。也可不用容器，在相同环境变量下运行 `npm start`；Node.js 本身不会自动读取 `.env`，本机可使用 `node --env-file=.env server/index.mjs`。服务只能解析，不能作为任意网址代理。对外部署时通过 HTTPS 入口访问。
+
+Worker 配置在 `worker/wrangler.toml`。修改测试 Worker 名称并选择自己的账号，用 Wrangler 的交互式 Secret 输入配置凭据：
+
+```sh
+npx wrangler login
+npx wrangler secret put API_TOKEN --config worker/wrangler.toml
+npx wrangler secret put YUANBAO_COOKIE --config worker/wrangler.toml
+npm run worker:deploy
+```
+
+输入 Cookie 时关闭终端录制，不把它放进命令行参数。部署到 Cloudflare 与上游接受其出口请求分别验收，进度见 [#9](https://github.com/MC0571/weixin-channels-video/issues/9)。本地开发可在 `worker/.dev.vars` 中设置相同两项后执行 `npm run worker:dev`；该文件已忽略。
+
+调用示例，API 访问凭据由调用者的环境变量提供：
+
+```sh
+curl --fail-with-body http://localhost:3000/parse \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"url":"https://weixin.qq.com/sph/你的分享链接"}'
+```
+
+成功响应：
+
+```json
+{"data":{"sourceUrl":"https://weixin.qq.com/sph/example","title":"视频标题","author":"作者","coverUrl":"https://media.example/cover.jpg","previewUrl":"https://media.example/video.mp4","downloadUrl":"https://media.example/video.mp4"}}
+```
+
+错误响应为 `{"error":{"code":"AUTH_EXPIRED","message":"元宝登录已失效，请重新登录。"}}`。`API_UNAUTHORIZED` 表示服务访问凭据无效；`AUTH_EXPIRED` 表示部署者的元宝会话失效。两者的 HTTP 状态都是 401，由 `code` 区分。
+
 ### Chrome 浏览器扩展
 
 在安装扩展的 Chrome profile 中登录腾讯元宝，然后：
@@ -83,6 +163,8 @@ Content-Type: application/json
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 
 扩展仅申请功能所需的站点和下载权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+
+扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 
 ## 一个核心解析引擎
 
@@ -109,9 +191,23 @@ flowchart TB
 
 各入口负责登录态获取、网络请求适配、用户交互和文件保存；Skill 额外负责宿主环境检测与执行方式选择。解析规则只在核心中维护一次；Skill 的两种执行方式、服务和扩展使用同一核心。
 
+核心入口是 `src/core.mjs`，导出 `parseShareLink(url, { request })`、`checkLogin(request)` 和 `ParseError`。`request(url, init)` 使用 Fetch 风格返回值，认证留在请求适配器中。Node / Worker 复用 `src/cookie-request.mjs`，仅向固定元宝接口发送部署者 Cookie，并拒绝重定向。
+
+`checkLogin` 返回 `{status: "authenticated"}` 或 `{status: "anonymous"}`，格式或网络异常抛出 `LOGIN_CHECK_FAILED`。`parseShareLink` 自行检查登录，匿名或过期返回 `AUTH_EXPIRED`。结果不包含内部 `token` / `eid`。
+
+| 核心错误 | 含义 | API HTTP 状态 |
+| --- | --- | --- |
+| `INVALID_URL` | 分享链接格式不支持 | 400 |
+| `AUTH_EXPIRED` | 元宝未登录或需刷新会话 | 401 |
+| `LOGIN_CHECK_FAILED` | 无法可靠检查登录 | 502 |
+| `FEED_UNAVAILABLE` | 内容不可用或无媒体 | 404 |
+| `UPSTREAM_ERROR` | 上游 HTTP、格式或协议异常 | 502 |
+
 账号检查使用元宝 `/api/getuserinfo`。分享链接解析使用 `/api/weixin/get_parse_result`，随后调用视频号 `/finder-preview/api/feed/get_feed_info`。视频媒体地址来自详情响应中的 `h264VideoInfo.videoUrl` 等字段。
 
 本路线按分享预览接口返回的媒体地址直接下载。内容解析失败或下载文件无法播放时，需要返回明确错误。
+
+本地保存检查 HTTP、非空内容和已知文本错误响应；首次真实视频还需要媒体工具或播放器确认可播放。项目没有加入未经具体媒体证明需要的解密器。
 
 ## 使用条件
 
