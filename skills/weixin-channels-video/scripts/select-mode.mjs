@@ -19,7 +19,7 @@ export async function selectExecution({ mode = 'auto', builtin, chrome, checkLog
     }
     const selected = { mode: name, request, login };
     if (login.status === 'authenticated' || mode !== 'auto') return selected;
-    anonymous = selected;
+    anonymous ??= selected;
   }
 
   if (anonymous) return anonymous;

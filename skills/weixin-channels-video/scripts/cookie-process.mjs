@@ -28,8 +28,12 @@ export function readChromeCookieHeaders(cookieDb, requestUrls) {
       if (code !== 0) {
         if (diagnostic.includes('browser-cookie3 is missing') || diagnostic.includes('version mismatch')) {
           reject(new Error('browser-cookie3==0.20.1 is required; install the dependency listed in this skill\'s requirements.txt.'));
+        } else if (diagnostic.includes('cookie-database-open-close-chrome') || diagnostic.includes('cookie-database-wal-pending-close-chrome')) {
+          reject(new Error('Close Chrome to checkpoint its cookie database, then retry local mode.'));
+        } else if (diagnostic.includes('cookie-database-open-check-failed') || diagnostic.includes('cookie-database-wal-check-failed')) {
+          reject(new Error('Could not verify that Chrome’s cookie database is safe to read; close Chrome and retry.'));
         } else if (diagnostic.includes('cookie-database-unavailable-read-only')) {
-          reject(new Error('Chrome could not open the selected cookie database in read-only mode; close Chrome and retry.'));
+          reject(new Error('Chrome cookies could not be opened read-only; close Chrome and retry.'));
         } else if (diagnostic.includes('Keychain access or cookie decryption failed')) {
           reject(new Error('Chrome Safe Storage access or cookie decryption failed.'));
         } else {

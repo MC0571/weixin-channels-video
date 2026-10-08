@@ -54,3 +54,12 @@ test('an anonymous built-in remains the selected mode if Chrome is unavailable',
   assert.equal(selected.mode, 'builtin');
   assert.equal(selected.login.status, 'anonymous');
 });
+
+test('built-in remains the preferred login destination when both modes are anonymous', async () => {
+  const selected = await selectExecution({
+    builtin: { available: true, request: 'built-in' },
+    chrome: { available: true, getRequest: async () => 'chrome' },
+    checkLogin: async () => ({ status: 'anonymous' }),
+  });
+  assert.equal(selected.mode, 'builtin');
+});

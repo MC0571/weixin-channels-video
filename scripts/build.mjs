@@ -20,8 +20,8 @@ await build({
 });
 await build({
   entryPoints: [join(skill, 'scripts/codex-browser.mjs')],
-  outfile: join(dist, 'weixin-channels-video/scripts/browser.js'),
-  bundle: true, platform: 'neutral', format: 'iife', globalName: 'WXChannelsBuiltin',
+  outfile: join(dist, 'weixin-channels-video/scripts/browser.mjs'),
+  bundle: true, platform: 'neutral', format: 'esm',
 });
 await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
 await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));

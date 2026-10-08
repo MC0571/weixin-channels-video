@@ -1,4 +1,6 @@
 import { API_URLS, checkLogin, parseShareLink } from '../../../src/core.mjs';
+export { checkLogin };
+export { selectExecution } from './select-mode.mjs';
 
 // CDP handles stay in the host runtime; response bodies must never be printed.
 export function createBrowserRequest({ yuanbaoCdp, channelsCdp }) {
@@ -23,7 +25,7 @@ export function createBrowserRequest({ yuanbaoCdp, channelsCdp }) {
     let result;
     try {
       result = await cdp.send('Runtime.evaluate', {
-        expression: `(async()=>{const r=await fetch(${JSON.stringify(url.href)},${JSON.stringify(options)});return {status:r.status,body:await r.json()}})()`,
+        expression: `(async()=>{const r=await fetch(${JSON.stringify(url.href)},${JSON.stringify(options)});return {status:r.status,text:await r.text()}})()`,
         awaitPromise: true,
         returnByValue: true,
       });
@@ -31,8 +33,8 @@ export function createBrowserRequest({ yuanbaoCdp, channelsCdp }) {
       throw new Error('Browser request failed.');
     }
     if (result.exceptionDetails || !result.result?.value) throw new Error('Browser request failed.');
-    const { status, body } = result.result.value;
-    return { status, ok: status >= 200 && status < 300, json: async () => body };
+    const { status, text } = result.result.value;
+    return { status, ok: status >= 200 && status < 300, json: async () => JSON.parse(text) };
   };
 }
 

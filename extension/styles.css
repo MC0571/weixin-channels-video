@@ -242,6 +242,13 @@ footer {
   font-size: 12px;
 }
 
+footer a {
+  margin-left: 6px;
+  color: var(--green-dark);
+  font-weight: 650;
+  text-underline-offset: 3px;
+}
+
 @media (max-width: 640px) {
   .shell {
     width: min(100% - 24px, 920px);

@@ -4,6 +4,7 @@
 import argparse
 import json
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -53,6 +54,32 @@ def _eligible(row, request_host, request_path, secure_request, now):
     return True
 
 
+def _check_database_closed(cookie_db, run=None):
+    try:
+        result = (run or subprocess.run)(
+            ["/usr/sbin/lsof", "-t", "--", str(cookie_db)],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        raise CookieReaderError("cookie-database-open-check-failed") from error
+    if result.returncode == 0:
+        raise CookieReaderError("cookie-database-open-close-chrome")
+    if result.returncode != 1:
+        raise CookieReaderError("cookie-database-open-check-failed")
+
+
+def _check_wal_checkpointed(cookie_db):
+    wal_path = Path(f"{cookie_db}-wal")
+    try:
+        if wal_path.stat().st_size:
+            raise CookieReaderError("cookie-database-wal-pending-close-chrome")
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CookieReaderError("cookie-database-wal-check-failed") from error
+
+
 def select_cookie_rows(cookie_db, request_url, now=None):
     parsed = urlsplit(request_url)
     request_host = (parsed.hostname or "").lower()
@@ -60,7 +87,8 @@ def select_cookie_rows(cookie_db, request_url, now=None):
         raise CookieReaderError("unsupported-cookie-url")
     request_path = parsed.path or "/"
     candidates = _domain_candidates(request_host)
-    uri = f"file:{quote(str(Path(cookie_db).resolve()), safe='/')}?mode=ro"
+    _check_wal_checkpointed(cookie_db)
+    uri = f"file:{quote(str(Path(cookie_db).resolve()), safe='/')}?mode=ro&immutable=1"
 
     try:
         with sqlite3.connect(uri, uri=True) as connection:
@@ -118,6 +146,11 @@ def _main():
     if sys.platform != "darwin":
         print("macOS Chrome cookie reading is supported on macOS only.", file=sys.stderr)
         return 2
+    try:
+        _check_database_closed(args.cookie_db)
+    except CookieReaderError as error:
+        print(f"Cookie read failed: {error}.", file=sys.stderr)
+        return 1
     try:
         import browser_cookie3
         from importlib.metadata import PackageNotFoundError, version

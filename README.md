@@ -83,7 +83,9 @@ node dist/weixin-channels-video/scripts/cli.mjs download \
 
 依赖装到自己的 Python 环境即可，安装后的 Skill 包无需仓库或 npm 构建工具。多个 profile 时必须选择一个；可以使用列出的目录名或显示名。保存目录需已存在，目标文件已存在时返回错误并保留原文件，失败会清理本次临时文件。
 
-Codex App 内置浏览器适配使用 `scripts/browser.js` 中的同一核心，通过两站各自标签页的 CDP 发起同源请求，再通过宿主的媒体下载能力取得本地文件。具体调用见包内 `SKILL.md`。宿主必须允许这两个来源、执行共享脚本并保存文件，才可将内置模式视为可用；当前完整内置链路仍待首次实测，[#5](https://github.com/MC0571/weixin-channels-video/issues/5) 跟踪此项。
+本地读取前关闭 Chrome，让 Cookie 数据库完成 checkpoint。helper 检查该数据库是否仍被进程打开、是否有尚未落入主库的 WAL；有则停止并提示关闭后重试。读取使用 SQLite immutable 模式，避免普通只读连接仍可能在 profile 中创建旁文件；不会复制 Cookie 数据库或 profile。内置方式不受此本地读取条件影响。
+
+Codex App 内置浏览器适配使用 `scripts/browser.mjs` 中的同一核心，通过两站各自标签页的 CDP 发起同源请求，再通过宿主的媒体下载能力取得本地文件。具体调用见包内 `SKILL.md`。宿主必须允许这两个来源、执行共享脚本并保存文件，才可将内置模式视为可用；当前完整内置链路仍待首次实测，[#5](https://github.com/MC0571/weixin-channels-video/issues/5) 跟踪此项。
 
 Cookie 留在所选浏览器或本地进程中，不进入 AI 对话、日志或解析结果。登录失效时，提示用户在对应浏览器中重新登录。
 

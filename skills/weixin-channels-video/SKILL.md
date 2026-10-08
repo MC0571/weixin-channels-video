@@ -15,7 +15,7 @@ First identify the host's actual browser and script tools. A usable built-in mod
 
 ## Codex App built-in browser
 
-The packaged `scripts/browser.js` is an esbuild IIFE containing the shared core and the Codex adapter. Read this file using local file tools and execute its contents in the host's persistent JavaScript tool runtime, not inside a webpage. It defines `WXChannelsBuiltin`. Keep all parser/CDP response values in that runtime; print only login status, fixed error codes, or saved file paths.
+The packaged `scripts/browser.mjs` is a self-contained ESM bundle of the shared core and the Codex adapter. Load it in the host's persistent JavaScript runtime with `const WXChannelsBuiltin = await import('file:///absolute/skill/root/scripts/browser.mjs')`, replacing the path with the installed skill location. This import has been tested in Codex App's `cua_repl`. Keep all parser/CDP response values in that runtime; print only login status, fixed error codes, or saved file paths.
 
 1. Select the in-app browser using its documented entry point. Obtain a Yuanbao tab and a Channels tab, with each tab navigated to its own permitted origin. Read the advertised `cdp` capability documentation; do not assume access is granted merely because the capability exists. Never put a token-bearing feed URL into the conversation or tool output.
 2. Bind `yuanbaoCdp = await yuanbaoTab.capabilities.get('cdp')`. Call `WXChannelsBuiltin.checkBrowserLogin(yuanbaoCdp)`. A known anonymous result allows default fallback to the Chrome CLI. A failed check is an error and must not be presented as logged out.
@@ -23,6 +23,8 @@ The packaged `scripts/browser.js` is an esbuild IIFE containing the shared core 
 4. Keep the result private in a runtime variable. Call `WXChannelsBuiltin.downloadInBrowser(result, yuanbaoTab)`; it creates and then removes a temporary media link and uses the host's `downloadMedia` capability. Return only the downloaded local path. Use the local CLI's `save-existing` command below to publish it at the requested destination without overwriting.
 
 This adapter has controlled tests; its first complete live parse-and-save acceptance is still tracked by repository Issue #5. If the host cannot load the bundle, access the second origin, or save media, do not claim built-in support in that environment. Use the Chrome route when permitted and selected by the above rules. An explicit tool approval rejection is not a reason to reproduce the rejected access through another tool.
+
+The bundle also exports `selectExecution({mode, builtin, chrome, checkLogin: WXChannelsBuiltin.checkLogin})` for hosts providing both request factories. Candidates use `{available, request}` or a lazy `{available, getRequest}`. The selector checks built-in first and never calls the Chrome factory after a valid built-in login. In a host that executes the Chrome CLI separately, follow the same sequence with the commands below rather than trying to run Cookie extraction inside a webpage.
 
 ## Local Chrome mode
 
@@ -39,6 +41,8 @@ node <skill-root>/scripts/cli.mjs check-login [--profile <directory-or-name>]
 node <skill-root>/scripts/cli.mjs download --url <share-link> --output <file> [--profile <directory-or-name>]
 node <skill-root>/scripts/cli.mjs save-existing <browser-downloaded-file> --output <file>
 ```
+
+Chrome may need to be fully closed before local Cookie access. The helper requires a checkpointed Cookie database and refuses an active Chrome database or a pending WAL. This affects local Chrome mode only; use the built-in browser mode when it is available.
 
 If no profile is specified, select it automatically only when Chrome reports exactly one profile. A failed login check is an error, not an anonymous result. Do not print, copy into chat, or log cookies, Keychain data, `generalToken`, or authenticated URLs.
 

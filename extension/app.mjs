@@ -115,6 +115,9 @@ function initializePage() {
     event.preventDefault();
     parseButton.disabled = true;
     downloadButton.disabled = true;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
     resultCard.hidden = true;
     result = null;
     setParseStatus("正在检查登录状态并解析…");

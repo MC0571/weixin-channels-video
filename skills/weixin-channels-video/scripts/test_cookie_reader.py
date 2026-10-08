@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cookie_reader import NT_EPOCH_OFFSET, _main, cookie_pairs, select_cookie_rows
+from cookie_reader import CookieReaderError, NT_EPOCH_OFFSET, _check_database_closed, _main, cookie_pairs, select_cookie_rows
 
 
 class CookieReaderTests(unittest.TestCase):
@@ -86,6 +86,21 @@ class CookieReaderTests(unittest.TestCase):
         self.assertEqual([row[4] for row in user_rows], ["userinfo"])
         self.assertEqual([row[4] for row in parse_rows], ["parse"])
 
+    def test_immutable_read_of_checkpointed_wal_database_creates_no_sidecars(self):
+        self.add("yuanbao.tencent.com", "/api", "safe", "fake-value")
+        connection = sqlite3.connect(self.cookie_db)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+        self.assertFalse(Path(f"{self.cookie_db}-wal").exists())
+        self.assertFalse(Path(f"{self.cookie_db}-shm").exists())
+
+        rows, _ = select_cookie_rows(self.cookie_db, "https://yuanbao.tencent.com/api/getuserinfo")
+        self.assertEqual([row[4] for row in rows], ["safe"])
+        self.assertEqual([path.name for path in self.root.iterdir()], ["Cookies"])
+
     def test_helper_batches_per_url_cookie_headers_in_one_child(self):
         self.add("yuanbao.tencent.com", "/api/getuserinfo", "userinfo", "alpha")
         self.add("yuanbao.tencent.com", "/api/weixin/get_parse_result", "parse", "beta")
@@ -102,6 +117,7 @@ class CookieReaderTests(unittest.TestCase):
         with (
             patch("sys.argv", argv),
             patch("sys.platform", "darwin"),
+            patch("cookie_reader.subprocess.run", return_value=types.SimpleNamespace(returncode=1)),
             patch.dict("sys.modules", {"browser_cookie3": browser_cookie_stub}),
             patch("importlib.metadata.version", return_value="0.20.1"),
             contextlib.redirect_stdout(stdout),
@@ -115,6 +131,29 @@ class CookieReaderTests(unittest.TestCase):
                 {"url": parse_url, "cookies": [["parse", "beta"]]},
             ],
         })
+
+    def test_rejects_a_database_with_a_pending_wal(self):
+        connection = sqlite3.connect(self.cookie_db)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("yuanbao.tencent.com", "/", 0, 0, "fake", "value", b"", 0),
+            )
+            connection.commit()
+            wal_path = Path(f"{self.cookie_db}-wal")
+            self.assertGreater(wal_path.stat().st_size, 0)
+            with self.assertRaisesRegex(CookieReaderError, "cookie-database-wal-pending-close-chrome"):
+                select_cookie_rows(self.cookie_db, "https://yuanbao.tencent.com/api/getuserinfo")
+        finally:
+            connection.close()
+
+    def test_lsof_open_or_failed_checks_stop_cookie_access(self):
+        with self.assertRaisesRegex(CookieReaderError, "cookie-database-open-close-chrome"):
+            _check_database_closed(self.cookie_db, lambda *args, **kwargs: types.SimpleNamespace(returncode=0))
+        with self.assertRaisesRegex(CookieReaderError, "cookie-database-open-check-failed"):
+            _check_database_closed(self.cookie_db, lambda *args, **kwargs: types.SimpleNamespace(returncode=2))
+        _check_database_closed(self.cookie_db, lambda *args, **kwargs: types.SimpleNamespace(returncode=1))
 
     def test_path_secure_and_expiry_rules(self):
         from cookie_reader import _eligible
