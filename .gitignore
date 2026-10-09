@@ -1,1 +1,17 @@
 node_modules/
+dist/
+extension/app.js
+extension/background.js
+extension/agent.js
+.wrangler/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.mp4
+.DS_Store

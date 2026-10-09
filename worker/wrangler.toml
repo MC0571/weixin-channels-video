@@ -1,0 +1,3 @@
+name = "weixin-channels-video-test"
+main = "./index.mjs"
+compatibility_date = "2026-10-09"
