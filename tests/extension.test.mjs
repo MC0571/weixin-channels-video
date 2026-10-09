@@ -554,6 +554,13 @@ test("download filenames are safe and existing files are uniquified", async () =
   assert.equal(options.filename.includes(".."), false);
   assert.equal(options.conflictAction, "uniquify");
   assert.equal("saveAs" in options, false);
+  for (const title of ["中".repeat(90), "中".repeat(100), "😀".repeat(100)]) {
+    options = undefined;
+    await startDownload({ title, downloadUrl: "https://media.example/video.mp4" }, chromeApi);
+    assert.equal(options.filename, safeFilename(title));
+    assert.ok(new TextEncoder().encode(options.filename).byteLength <= 255);
+    assert.equal(options.conflictAction, "uniquify");
+  }
   await startDownload({ title: "unused", downloadUrl: "https://media.example/video.mp4" }, chromeApi, "Clips/custom.mp4");
   assert.equal(options.filename, "Clips/custom.mp4");
   await assert.rejects(

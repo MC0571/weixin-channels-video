@@ -194,7 +194,8 @@ export function safeFilename(title) {
     .replace(/\.+/g, "_")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 100)
+    // 80 UTF-16 units cap this name at 240 UTF-8 bytes, plus the 4-byte ".mp4" suffix.
+    .slice(0, 80)
     .trim();
   return `${name || "weixin-video"}.mp4`;
 }
