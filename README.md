@@ -166,7 +166,9 @@ curl --fail-with-body http://localhost:3000/parse \
 
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 
-扩展仅申请功能所需的站点和下载权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+解析时需在当前 Chrome profile 中保持至少一个已登录的元宝标签页打开。扩展通过 `scripting` 权限在该标签页的页面环境中发送固定的解析请求，让元宝接收来自自身页面来源的请求；扩展不读取 Cookie。关闭元宝标签页后，解析会提示重新打开并登录元宝。
+
+扩展仅申请下载、页面注入及两个上游站点所需的权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
 扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 

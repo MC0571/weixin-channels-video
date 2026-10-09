@@ -133,6 +133,40 @@ test("parseShareLink checks login, uses playable_url token and eid, and returns 
   assert.equal(JSON.stringify(result).includes("synthetic-eid"), false);
 });
 
+test("parseShareLink distinguishes authentication failure from a forbidden parse request", async () => {
+  const makeRequest = (status) => async (url) =>
+    url === API_URLS.userInfo ? authenticatedResponse() : new Response(null, { status });
+
+  await assertCode(
+    parseShareLink("https://weixin.qq.com/sph/share-id", { request: makeRequest(401) }),
+    "AUTH_EXPIRED",
+  );
+  await assert.rejects(
+    parseShareLink("https://weixin.qq.com/sph/share-id", { request: makeRequest(403) }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_ERROR");
+      assert.equal(error.message, "元宝拒绝解析请求（HTTP 403）。");
+      return true;
+    },
+  );
+});
+
+test("parseShareLink preserves an actionable missing-session-tab error from the request adapter", async () => {
+  const request = async (url) => {
+    if (url === API_URLS.userInfo) return authenticatedResponse();
+    throw new ParseError("LOGIN_CHECK_FAILED", "请保持元宝标签页打开。");
+  };
+
+  await assert.rejects(
+    parseShareLink("https://weixin.qq.com/sph/share-id", { request }),
+    (error) => {
+      assert.equal(error.code, "LOGIN_CHECK_FAILED");
+      assert.equal(error.message, "请保持元宝标签页打开。");
+      return true;
+    },
+  );
+});
+
 test("parseShareLink rejects malformed share URLs before making requests", async () => {
   let called = false;
   const request = async () => {

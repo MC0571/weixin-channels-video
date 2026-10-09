@@ -108,12 +108,16 @@ async function readJson(request, url, init, code, authCode) {
   let response;
   try {
     response = await request(url, init);
-  } catch {
+  } catch (error) {
+    if (error instanceof ParseError) throw error;
     fail(code);
   }
 
-  if (authCode && (response?.status === 401 || response?.status === 403)) {
+  if (authCode && response?.status === 401) {
     fail(authCode);
+  }
+  if (authCode && response?.status === 403) {
+    throw new ParseError(code, "元宝拒绝解析请求（HTTP 403）。");
   }
   if (response?.ok !== true) fail(code);
 

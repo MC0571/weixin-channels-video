@@ -6,7 +6,7 @@ const ENDPOINTS = new Map([
   [API_URLS.feedInfo, { method: "POST", host: "channels.weixin.qq.com" }],
 ]);
 
-export function createExtensionRequest(fetchImpl = globalThis.fetch) {
+export function createExtensionRequest(fetchImpl = globalThis.fetch, chromeApi = globalThis.chrome) {
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
 
   return async (value, init = {}) => {
@@ -23,6 +23,40 @@ export function createExtensionRequest(fetchImpl = globalThis.fetch) {
     }
     if (String(init.method || "GET").toUpperCase() !== endpoint.method) {
       throw new TypeError("Method is not allowed for this API endpoint");
+    }
+
+    if (url.href === API_URLS.parseShare) {
+      const [tab] = await chromeApi.tabs.query({ url: "https://yuanbao.tencent.com/*" });
+      if (typeof tab?.id !== "number") {
+        throw new ParseError(
+          "LOGIN_CHECK_FAILED",
+          "请在当前 Chrome 中打开已登录的元宝页面，并保持该标签页打开。",
+        );
+      }
+
+      const [injection] = await chromeApi.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        func: async (body) => {
+          if (location.origin !== "https://yuanbao.tencent.com") {
+            throw new Error("Yuanbao tab origin changed before parsing");
+          }
+          const response = await fetch("https://yuanbao.tencent.com/api/weixin/get_parse_result", {
+            method: "POST",
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body,
+            credentials: "include",
+            redirect: "error",
+          });
+          return {
+            status: response.status,
+            body: [401, 403].includes(response.status) ? "" : await response.text(),
+          };
+        },
+        args: [init.body],
+      });
+      const { status, body } = injection.result;
+      return new Response([204, 205, 304].includes(status) ? null : body, { status });
     }
 
     const headers = new Headers(init.headers);

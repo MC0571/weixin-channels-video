@@ -8,7 +8,7 @@ import {
   safeFilename,
   startDownload,
 } from "../extension/app.mjs";
-import { API_URLS } from "../src/core.mjs";
+import { API_URLS, parseShareLink } from "../src/core.mjs";
 
 test("extension requests only fixed APIs with isolated credentials and browser-owned headers", async () => {
   const calls = [];
@@ -44,6 +44,123 @@ test("extension requests only fixed APIs with isolated credentials and browser-o
   await assert.rejects(request("https://attacker.example/collect", { method: "POST" }), TypeError);
   await assert.rejects(request(API_URLS.userInfo, { method: "POST" }), TypeError);
   assert.equal(calls.length, 2);
+});
+
+test("parseShare requests run in the open Yuanbao tab and return only serializable response data", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  let injected;
+  let tabQuery;
+  let pageRequest;
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { origin: "https://yuanbao.tencent.com" },
+  });
+  globalThis.fetch = async (url, init) => {
+    pageRequest = { url, init };
+    return new Response("synthetic parse denial", { status: 403 });
+  };
+  const request = createExtensionRequest(async () => {
+    throw new Error("parse request must use the Yuanbao tab");
+  }, {
+    tabs: {
+      query: async (query) => {
+        tabQuery = query;
+        return [{ id: 12 }];
+      },
+    },
+    scripting: {
+      executeScript: async (details) => {
+        injected = details;
+        return [{ result: await details.func(...details.args) }];
+      },
+    },
+  });
+
+  try {
+    const response = await request(API_URLS.parseShare, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: "{\"type\":\"video_channel_url\"}",
+    });
+    assert.deepEqual(tabQuery, { url: "https://yuanbao.tencent.com/*" });
+    assert.equal(injected.target.tabId, 12);
+    assert.equal(injected.world, "MAIN");
+    assert.deepEqual(pageRequest, {
+      url: "https://yuanbao.tencent.com/api/weixin/get_parse_result",
+      init: {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: "{\"type\":\"video_channel_url\"}",
+        credentials: "include",
+        redirect: "error",
+      },
+    });
+    assert.equal(response.status, 403);
+    assert.equal(await response.text(), "");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else delete globalThis.location;
+  }
+});
+
+test("parseShare injection does not request when the selected tab has navigated to another origin", async () => {
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const previousFetch = globalThis.fetch;
+  let fetchCalled = false;
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { origin: "https://attacker.example" },
+  });
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    return Response.json({});
+  };
+  const request = createExtensionRequest(async () => assert.fail("must use the Yuanbao tab"), {
+    tabs: { query: async () => [{ id: 12 }] },
+    scripting: {
+      executeScript: async (details) => [{ result: await details.func(...details.args) }],
+    },
+  });
+
+  try {
+    await assert.rejects(
+      request(API_URLS.parseShare, { method: "POST", body: "{}" }),
+      /origin changed/,
+    );
+    assert.equal(fetchCalled, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else delete globalThis.location;
+  }
+});
+
+test("parseShare requests explain when no Yuanbao tab is open and leave other requests unchanged", async () => {
+  const calls = [];
+  const request = createExtensionRequest(async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({
+      userId: "synthetic-user",
+      needRefreshToken: false,
+      anonUser: { isAnon: false },
+    }));
+  }, {
+    tabs: { query: async () => [] },
+    scripting: { executeScript: async () => assert.fail("must not inject without a tab") },
+  });
+
+  await assert.rejects(
+    parseShareLink("https://weixin.qq.com/sph/share-id", { request }),
+    (error) => {
+      assert.equal(error.code, "LOGIN_CHECK_FAILED");
+      assert.equal(error.message, "请在当前 Chrome 中打开已登录的元宝页面，并保持该标签页打开。");
+      return true;
+    },
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, API_URLS.userInfo);
 });
 
 test("download filenames are safe and existing files are uniquified", async () => {
@@ -97,9 +214,9 @@ test("download status survives reopening through Chrome's own recent download hi
   assert.equal(downloadStatus(null), "还没有下载记录。");
 });
 
-test("manifest requests only download and upstream-host permissions", async () => {
+test("manifest requests only required extension and upstream-host permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url)));
-  assert.deepEqual(manifest.permissions, ["downloads"]);
+  assert.deepEqual(manifest.permissions, ["downloads", "scripting"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*",
