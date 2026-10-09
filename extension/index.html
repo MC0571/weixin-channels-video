@@ -45,19 +45,25 @@
         </div>
         <div class="result-grid">
           <div class="media-column">
-            <img id="cover-image" class="cover-image" alt="视频封面" hidden>
             <video id="preview-video" controls preload="metadata"></video>
+            <section class="media-variants-panel" aria-labelledby="media-variants-heading">
+              <h3 id="media-variants-heading">下载视频版本</h3>
+              <ul id="media-variants" class="media-variants" aria-label="可下载视频版本"></ul>
+            </section>
           </div>
-          <dl class="metadata">
-            <div>
-              <dt>标题</dt>
-              <dd id="video-title"></dd>
-            </div>
-            <div>
-              <dt>作者</dt>
-              <dd id="video-author"></dd>
-            </div>
-          </dl>
+          <aside class="result-details">
+            <dl class="metadata">
+              <div>
+                <dt>标题</dt>
+                <dd id="video-title"></dd>
+              </div>
+              <div>
+                <dt>作者</dt>
+                <dd id="video-author"></dd>
+              </div>
+            </dl>
+            <img id="cover-image" class="cover-image" alt="视频封面" hidden>
+          </aside>
         </div>
       </section>
 

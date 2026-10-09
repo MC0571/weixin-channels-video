@@ -98,6 +98,7 @@ test('returns shared-core results without forwarding caller credentials upstream
     coverUrl: 'https://video.example/cover.jpg',
     previewUrl: 'https://video.example/video.mp4',
     downloadUrl: 'https://video.example/video.mp4',
+    mediaVariants: [{ label: 'H.264', downloadUrl: 'https://video.example/video.mp4' }],
   } });
   assert.equal(calls.length, 3);
   assert.equal(calls[0].init.headers.get('cookie'), secret.yuanbaoCookie);

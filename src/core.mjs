@@ -277,12 +277,19 @@ export async function parseShareLink(value, options = {}) {
   ) {
     fail("UPSTREAM_ERROR");
   }
-  const selectedMedia =
-    textField(h264, "videoUrl") ||
-    textField(feedInfo, "videoUrl") ||
-    textField(h265, "videoUrl");
-  if (!selectedMedia) fail("FEED_UNAVAILABLE");
-  const mediaUrl = optionalHttpsUrl(selectedMedia);
+  const mediaVariants = [];
+  for (const [label, source] of [
+    ["H.264", h264],
+    ["通用视频", feedInfo],
+    ["H.265", h265],
+  ]) {
+    const downloadUrl = optionalHttpsUrl(textField(source, "videoUrl"));
+    if (downloadUrl && !mediaVariants.some((variant) => variant.downloadUrl === downloadUrl)) {
+      mediaVariants.push({ label, downloadUrl });
+    }
+  }
+  const mediaUrl = mediaVariants[0]?.downloadUrl;
+  if (!mediaUrl) fail("FEED_UNAVAILABLE");
 
   const authorInfo = data.authorInfo;
   if (authorInfo != null && !isRecord(authorInfo)) fail("UPSTREAM_ERROR");
@@ -301,5 +308,6 @@ export async function parseShareLink(value, options = {}) {
     coverUrl,
     previewUrl: mediaUrl,
     downloadUrl: mediaUrl,
+    mediaVariants,
   };
 }

@@ -151,7 +151,7 @@ curl --fail-with-body http://localhost:3000/parse \
 成功响应：
 
 ```json
-{"data":{"sourceUrl":"https://weixin.qq.com/sph/example","title":"视频标题","author":"作者","coverUrl":"https://media.example/cover.jpg","previewUrl":"https://media.example/video.mp4","downloadUrl":"https://media.example/video.mp4"}}
+{"data":{"sourceUrl":"https://weixin.qq.com/sph/example","title":"视频标题","author":"作者","coverUrl":"https://media.example/cover.jpg","previewUrl":"https://media.example/video.mp4","downloadUrl":"https://media.example/video.mp4","mediaVariants":[{"label":"H.264","downloadUrl":"https://media.example/video.mp4"}]}}
 ```
 
 错误响应为 `{"error":{"code":"AUTH_EXPIRED","message":"元宝登录已失效，请重新登录。"}}`。`API_UNAUTHORIZED` 表示服务访问凭据无效；`AUTH_EXPIRED` 表示部署者的元宝会话失效。两者的 HTTP 状态都是 401，由 `code` 区分。
@@ -161,8 +161,10 @@ curl --fail-with-body http://localhost:3000/parse \
 在安装扩展的 Chrome profile 中登录腾讯元宝，然后：
 
 1. 打开扩展并输入视频号分享链接。
-2. 查看解析得到的标题、作者、封面和视频预览。
-3. 点击下载，将视频保存到本地。
+2. 左侧查看默认视频预览及各版本下载链接，右侧查看封面、标题与作者。
+3. 点击所需版本的下载链接，将视频保存到本地。
+
+共享核心的 `mediaVariants` 收集分享接口实际返回的 H.264、通用视频地址和 H.265 版本，并按地址去重；首项是默认预览和下载版本。扩展通过视频元数据显示实际分辨率，无法识别时仍可下载该版本。编码类别不等于清晰度，接口没有返回的画质不会生成链接。
 
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 

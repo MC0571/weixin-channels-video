@@ -127,10 +127,67 @@ test("parseShareLink checks login, uses playable_url token and eid, and returns 
     coverUrl: "https://media.example/feed-cover.jpg",
     previewUrl: "https://media.example/h264.mp4",
     downloadUrl: "https://media.example/h264.mp4",
+    mediaVariants: [
+      { label: "H.264", downloadUrl: "https://media.example/h264.mp4" },
+      { label: "通用视频", downloadUrl: "https://media.example/base.mp4" },
+      { label: "H.265", downloadUrl: "https://media.example/h265.mp4" },
+    ],
   });
   assert.equal(calls.length, 3);
   assert.equal(JSON.stringify(result).includes("synthetic-token"), false);
   assert.equal(JSON.stringify(result).includes("synthetic-eid"), false);
+});
+
+test("parseShareLink returns unique available media variants and rejects invalid variant URLs", async () => {
+  const parseFeedInfo = (feedInfo) =>
+    parseShareLink("https://weixin.qq.com/sph/share-id", {
+      request: async (url) => {
+        if (url === API_URLS.userInfo) return authenticatedResponse();
+        if (url === API_URLS.parseShare) {
+          return response({
+            code: 0,
+            data: {
+              playable_url:
+                "https://channels.weixin.qq.com/finder-preview/pages/feed?token=synthetic-token&eid=synthetic-eid",
+            },
+          });
+        }
+        return response({ errCode: 0, data: { feedInfo } });
+      },
+    });
+
+  const duplicateResult = await parseFeedInfo({
+    h264VideoInfo: { videoUrl: "https://media.example/shared.mp4" },
+    videoUrl: "https://media.example/shared.mp4",
+    h265VideoInfo: { videoUrl: "https://media.example/h265.mp4" },
+  });
+  assert.deepEqual(duplicateResult.mediaVariants, [
+    { label: "H.264", downloadUrl: "https://media.example/shared.mp4" },
+    { label: "H.265", downloadUrl: "https://media.example/h265.mp4" },
+  ]);
+  assert.equal(duplicateResult.previewUrl, duplicateResult.mediaVariants[0].downloadUrl);
+  assert.equal(duplicateResult.downloadUrl, duplicateResult.mediaVariants[0].downloadUrl);
+
+  const defaultResult = await parseFeedInfo({ videoUrl: "https://media.example/default.mp4" });
+  assert.deepEqual(defaultResult.mediaVariants, [
+    { label: "通用视频", downloadUrl: "https://media.example/default.mp4" },
+  ]);
+  assert.equal(defaultResult.previewUrl, defaultResult.mediaVariants[0].downloadUrl);
+  assert.equal(defaultResult.downloadUrl, defaultResult.mediaVariants[0].downloadUrl);
+
+  const invalidUrl = "javascript:alert(1)";
+  await assert.rejects(
+    parseFeedInfo({
+      h264VideoInfo: { videoUrl: "https://media.example/h264.mp4" },
+      h265VideoInfo: { videoUrl: invalidUrl },
+    }),
+    (error) => {
+      assert.ok(error instanceof ParseError);
+      assert.equal(error.code, "UPSTREAM_ERROR");
+      assert.equal(error.message.includes(invalidUrl), false);
+      return true;
+    },
+  );
 });
 
 test("parseShareLink distinguishes authentication failure from a forbidden parse request", async () => {

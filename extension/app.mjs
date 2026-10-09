@@ -271,10 +271,15 @@ function initializePage() {
   const author = document.querySelector("#video-author");
   const cover = document.querySelector("#cover-image");
   const video = document.querySelector("#preview-video");
+  const mediaVariants = document.querySelector("#media-variants");
   const downloadButton = document.querySelector("#download-button");
   const downloadStatusElement = document.querySelector("#download-status");
   let result = null;
   let visibleDownloadId = null;
+  let parseGeneration = 0;
+  let downloadInProgress = false;
+  let metadataListeners = [];
+  let metadataProbes = [];
 
   const setParseStatus = (message, isError = false) => {
     parseStatus.textContent = message;
@@ -291,47 +296,174 @@ function initializePage() {
     }
   }
 
+  function clearMediaVariants() {
+    parseGeneration += 1;
+    for (const { target, type, listener } of metadataListeners) {
+      target.removeEventListener(type, listener);
+    }
+    metadataListeners = [];
+    for (const probe of metadataProbes) {
+      probe.pause();
+      probe.removeAttribute("src");
+      probe.load();
+    }
+    metadataProbes = [];
+    mediaVariants.replaceChildren();
+    return parseGeneration;
+  }
+
+  function renderMediaVariants(parsedResult, generation) {
+    const defaultUrl = parsedResult.downloadUrl;
+
+    for (const variant of parsedResult.mediaVariants) {
+      const isDefault = variant.downloadUrl === defaultUrl;
+      const row = document.createElement("li");
+      const link = document.createElement("a");
+      const name = document.createElement("span");
+      const label = document.createElement("span");
+      const defaultBadge = document.createElement("span");
+      const resolution = document.createElement("span");
+      const action = document.createElement("span");
+
+      link.className = "media-variant-link";
+      link.href = variant.downloadUrl;
+      name.className = "media-variant-name";
+      label.textContent = variant.label;
+      defaultBadge.className = "media-variant-default";
+      defaultBadge.textContent = "默认";
+      defaultBadge.hidden = !isDefault;
+      name.append(label, defaultBadge);
+      resolution.className = "media-variant-resolution";
+      resolution.textContent = "获取分辨率…";
+      action.className = "media-variant-action";
+      action.textContent = "下载";
+      link.append(name, resolution, action);
+      row.append(link);
+      mediaVariants.append(row);
+
+      const setResolution = (media) => {
+        if (generation !== parseGeneration || result !== parsedResult) return;
+        resolution.textContent = media.videoWidth > 0 && media.videoHeight > 0
+          ? `${media.videoWidth} × ${media.videoHeight}`
+          : "分辨率未知";
+      };
+      const watchMetadata = (media) => {
+        if (media.readyState >= HTMLMediaElement.HAVE_METADATA) {
+          setResolution(media);
+          return;
+        }
+        const registrations = [];
+        const stopWatching = () => {
+          for (const registration of registrations) {
+            media.removeEventListener(registration.type, registration.listener);
+            const index = metadataListeners.indexOf(registration);
+            if (index !== -1) metadataListeners.splice(index, 1);
+          }
+          registrations.length = 0;
+        };
+        const onMetadata = () => setResolution(media);
+        const onError = () => {
+          if (generation === parseGeneration && result === parsedResult) {
+            resolution.textContent = "分辨率未知";
+          }
+        };
+        const addListener = (type, listener) => {
+          const registration = { target: media, type, listener };
+          media.addEventListener(type, listener);
+          metadataListeners.push(registration);
+          registrations.push(registration);
+        };
+        const onMetadataResult = () => {
+          stopWatching();
+          onMetadata();
+        };
+        const onErrorResult = () => {
+          stopWatching();
+          onError();
+        };
+        for (const [type, listener] of [["loadedmetadata", onMetadataResult], ["error", onErrorResult]]) {
+          addListener(type, listener);
+        }
+      };
+
+      if (isDefault) {
+        watchMetadata(video);
+      } else {
+        const probe = document.createElement("video");
+        probe.preload = "metadata";
+        metadataProbes.push(probe);
+        watchMetadata(probe);
+        probe.src = variant.downloadUrl;
+        probe.load();
+      }
+    }
+  }
+
+  async function downloadMedia(downloadUrl) {
+    if (!result || downloadInProgress) return;
+    downloadInProgress = true;
+    downloadButton.disabled = true;
+    downloadStatusElement.textContent = "正在开始下载…";
+    try {
+      await startDownload({ ...result, downloadUrl }, chrome);
+      await refreshDownloadStatus();
+    } catch {
+      downloadStatusElement.textContent = "下载无法启动，请检查浏览器下载设置。";
+    } finally {
+      downloadInProgress = false;
+      downloadButton.disabled = !result;
+    }
+  }
+
+  mediaVariants.addEventListener("click", (event) => {
+    const link = event.target instanceof Element
+      ? event.target.closest("a.media-variant-link")
+      : null;
+    if (!link) return;
+    event.preventDefault();
+    const variant = result?.mediaVariants.find((item) => item.downloadUrl === link.href);
+    if (variant) void downloadMedia(variant.downloadUrl);
+  });
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const generation = clearMediaVariants();
     parseButton.disabled = true;
     downloadButton.disabled = true;
     video.pause();
     video.removeAttribute("src");
     video.load();
+    cover.hidden = true;
+    cover.removeAttribute("src");
     resultCard.hidden = true;
     result = null;
     setParseStatus("正在检查登录状态并解析…");
 
     try {
-      result = await parseShareLink(input.value, { request: createExtensionRequest() });
-      title.textContent = result.title || "未命名视频";
-      author.textContent = result.author || "作者信息不可用";
-      cover.hidden = !result.coverUrl;
-      if (result.coverUrl) cover.src = result.coverUrl;
-      video.src = result.previewUrl;
+      const parsedResult = await parseShareLink(input.value, { request: createExtensionRequest() });
+      if (generation !== parseGeneration) return;
+      result = parsedResult;
+      title.textContent = parsedResult.title || "未命名视频";
+      author.textContent = parsedResult.author || "作者信息不可用";
+      cover.hidden = !parsedResult.coverUrl;
+      if (parsedResult.coverUrl) cover.src = parsedResult.coverUrl;
+      video.src = parsedResult.previewUrl;
       video.load();
+      renderMediaVariants(parsedResult, generation);
       resultCard.hidden = false;
       downloadButton.disabled = false;
       setParseStatus("解析完成，可以预览或下载。");
     } catch (error) {
-      setParseStatus(error instanceof ParseError ? error.message : "解析请求失败，请稍后重试。", true);
+      if (generation === parseGeneration) {
+        setParseStatus(error instanceof ParseError ? error.message : "解析请求失败，请稍后重试。", true);
+      }
     } finally {
-      parseButton.disabled = false;
+      if (generation === parseGeneration) parseButton.disabled = false;
     }
   });
 
-  downloadButton.addEventListener("click", async () => {
-    if (!result) return;
-    downloadButton.disabled = true;
-    downloadStatusElement.textContent = "正在开始下载…";
-    try {
-      await startDownload(result, chrome);
-      await refreshDownloadStatus();
-    } catch {
-      downloadStatusElement.textContent = "下载无法启动，请检查浏览器下载设置。";
-    } finally {
-      downloadButton.disabled = false;
-    }
+  downloadButton.addEventListener("click", () => {
+    if (result) void downloadMedia(result.downloadUrl);
   });
 
   chrome.downloads.onChanged.addListener((delta) => {
