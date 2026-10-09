@@ -9,7 +9,7 @@ description: 通过本机 Chrome 插件解析视频号分享链接并下载视�
 
 ## 检测与首次安装
 
-需要 macOS、Node.js 24+ 和本机 Chrome。先执行：
+需要 macOS、Node.js 24+ 和本机 Chrome 116+。先执行：
 
 ```sh
 node <skill-root>/scripts/cli.mjs status
@@ -35,7 +35,9 @@ node <skill-root>/scripts/cli.mjs connect
 node <skill-root>/scripts/cli.mjs status
 ```
 
-`connect` 打开扩展自己的 Agent 连接页面，Chrome 由此启动本地桥接。使用时保留此页面；不会打开元宝或视频号标签页。已配置但未连接时直接连接，无需再次安装。桥接程序升级或安装时使用的 Node.js 可执行文件位置变化后重新注册桥接。
+用户可在插件主页面的“连接 AI 助手”区域直接开启、关闭和重新开启连接。默认关闭，手动解析与下载不受影响；关闭连接不会取消已接收的任务或已开始的下载。
+
+`connect` 复用已有连接；未连接时在选定 profile 中打开插件主页面、初始化该 profile 的配对并自动开启连接，Chrome 由此启动本地桥接。配对保存在此 profile 的扩展内部；首次提示未配置时执行 `connect`，无需再次安装已注册的桥接。使用时保留主页面，关闭或刷新后会断开；不会打开元宝或视频号标签页。已配置但未连接时直接连接，无需再次安装。桥接程序升级或安装时使用的 Node.js 可执行文件位置变化后重新注册桥接。
 
 元宝未登录时，请用户在同一 Chrome profile 中登录，再检查状态。扫码、验证码和必须由用户完成的系统确认交给用户；工具允许代操作且已授权的普通安装步骤继续完成。
 

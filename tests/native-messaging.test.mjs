@@ -8,10 +8,10 @@ import { EventEmitter } from "node:events";
 import { connect, createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { createAgentCommandHandler } from "../extension/agent.mjs";
+import { createAgentCommandHandler, createAgentConnectionController } from "../extension/agent.mjs";
 import { BRIDGE_ERROR_MESSAGES, BridgeFrameDecoder, encodeBridgeFrame, isSafeRelativeMp4Filename, NATIVE_HOST_NAME, validateBridgeCommand, validateBridgeResponse } from "../src/native-messaging.mjs";
 import { startNativeHost } from "../src/native-host.mjs";
-import { bridgeSocketPath, installBridge, readBridgeInstallation, readBridgeSession, writeBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
+import { bridgeSocketPath, installBridge, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
 import { BridgeError, requestBridge, waitForBridge } from "../skills/weixin-channels-video/scripts/bridge-client.mjs";
 import { runCli } from "../skills/weixin-channels-video/scripts/cli.mjs";
 
@@ -173,17 +173,18 @@ test("installer uses profile metadata only and writes private, exact user-level 
     });
     assert.equal(installed.profile.directory, "Profile 3");
     assert.equal((await readBridgeInstallation({ appSupportDir })).profileDirectory, "Profile 3");
-    assert.equal(await readBridgeSession(installed.config), null);
+    const sessionId = await readBridgeSession(installed.config);
+    assert.match(sessionId, /^[0-9a-f-]{36}$/);
     assert.equal((await stat(appSupportDir)).mode & 0o777, 0o700);
     assert.equal((await stat(join(appSupportDir, "bridge.json"))).mode & 0o777, 0o600);
     assert.equal((await stat(installed.hostManifestPath)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(appSupportDir, "session.json"))).mode & 0o777, 0o600);
     assert.equal((await stat(installed.launcherPath)).mode & 0o777, 0o700);
     const launcher = await readFile(installed.launcherPath, "utf8");
     assert.match(launcher, /'\/Applications\/Node Runtime\/bin\/node'/);
     assert.match(launcher, /"\$@"/);
     assert.equal((await readFile(join(chromeRoot, "Local State"), "utf8")).includes("Cookies"), false);
 
-    await writeBridgeSession(installed.config, SESSION_1);
     const updated = await installBridge({
       extensionId: EXTENSION_ID,
       profile: "Profile 3",
@@ -194,7 +195,17 @@ test("installer uses profile metadata only and writes private, exact user-level 
       nativeHostSource,
     });
     assert.equal(updated.profile.directory, "Profile 3");
-    assert.equal(await readBridgeSession(updated.config), null);
+    assert.equal(await readBridgeSession(updated.config), sessionId);
+    const reconfigured = await installBridge({
+      extensionId: "b".repeat(32),
+      profile: "Profile 3",
+      appSupportDir,
+      chromeUserDataDir: chromeRoot,
+      registryDir,
+      nodeExecutable: "/Applications/Node Runtime/bin/node",
+      nativeHostSource,
+    });
+    assert.notEqual(await readBridgeSession(reconfigured.config), sessionId);
   });
 });
 
@@ -287,7 +298,6 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   const config = { extensionId: EXTENSION_ID, profileDirectory: "Profile 3", chromeUserDataDir: "/tmp/chrome", appSupportDir: "/tmp/bridge" };
   const outputs = [];
   const errors = [];
-  let writtenSession;
   let launched;
   let waited;
   assert.equal(await runCli(["status"], {
@@ -322,16 +332,17 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   assert.equal(await runCli(["connect"], {
     stdout: (value) => outputs.push(value),
     readInstallation: async () => config,
-    readSession: async () => null,
-    writeSession: async (_config, sessionId) => { writtenSession = sessionId; return sessionId; },
-    launch: async (_config, sessionId) => { launched = sessionId; },
-    bridgeWait: async (_config, sessionId) => { waited = sessionId; },
+    readSession: async () => SESSION_1,
+    launch: async (bridgeConfig, pairedSession) => { launched = bridgeConfig; assert.equal(pairedSession, SESSION_1); },
+    bridgeWait: async (_config, sessionId) => {
+      if (!waited) { waited = sessionId; throw new BridgeError("BRIDGE_TIMEOUT", "ignored"); }
+    },
   }), 0);
-  assert.equal(launched, writtenSession);
-  assert.equal(waited, writtenSession);
+  assert.equal(launched, config);
+  assert.equal(waited, SESSION_1);
   assert.equal(outputs.pop(), "Connected to the Chrome extension.");
   assert.equal(errors.length, 0);
-  assert.equal(outputs.some((value) => value.includes(writtenSession)), false);
+  assert.equal(outputs.some((value) => value.includes(SESSION_1)), false);
 });
 
 test("CLI parse passes only the fixed command shape and never logs the share URL", async () => {
@@ -519,16 +530,13 @@ test("socket access failures stay distinct from disconnected bridge status and r
   assert.equal(JSON.stringify(stdout).includes("private-session.sock"), false);
 
   const connectErrors = [];
-  let wroteNewSession = false;
   const connectStatus = await runCli(["connect"], {
     stderr: (value) => connectErrors.push(value),
     readInstallation: async () => config,
     readSession: async () => SESSION_1,
     bridgeWait: async () => { throw new BridgeError("BRIDGE_CONNECTION_FAILED", rawError.message); },
-    writeSession: async () => { wroteNewSession = true; },
   });
   assert.equal(connectStatus, 1);
-  assert.equal(wroteNewSession, false);
   assert.equal(connectErrors[0], `BRIDGE_CONNECTION_FAILED: ${BRIDGE_ERROR_MESSAGES.BRIDGE_CONNECTION_FAILED}`);
   assert.equal(connectErrors[0].includes("EACCES"), false);
 });
@@ -543,7 +551,6 @@ test("waitForBridge preserves wrong-session protocol errors and connect does not
     await new Promise((resolve) => server.listen(socketPath, resolve));
 
     const errors = [];
-    let wroteSession = false;
     let launchedChrome = false;
     const exitCode = await runCli(["connect"], {
       stderr: (value) => errors.push(value),
@@ -553,14 +560,12 @@ test("waitForBridge preserves wrong-session protocol errors and connect does not
         ...options,
         timeoutMs: 250,
       }),
-      writeSession: async () => { wroteSession = true; },
       launch: async () => { launchedChrome = true; },
     });
     await new Promise((resolve) => server.close(resolve));
 
     assert.equal(exitCode, 1);
     assert.equal(errors[0], `BRIDGE_SESSION_MISMATCH: ${BRIDGE_ERROR_MESSAGES.BRIDGE_SESSION_MISMATCH}`);
-    assert.equal(wroteSession, false);
     assert.equal(launchedChrome, false);
   });
 });

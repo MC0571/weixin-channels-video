@@ -10,6 +10,7 @@ import {
   startDownload,
   waitForDownload,
 } from "../extension/app.mjs";
+import { createAgentConnectionController, startAgent } from "../extension/agent.mjs";
 import { API_URLS } from "../src/core.mjs";
 
 function createHiddenIframeHarness() {
@@ -515,21 +516,19 @@ test("background feed bridge serializes referer rules and cleans up after networ
   });
 });
 
-test("background feed bridge permits only the session-bound agent page as an additional sender", async () => {
+test("background feed bridge accepts only the exact extension index page", async () => {
   await withBackgroundHarness({}, async ({ extensionId, fetchCalls, send }) => {
     const request = createFeedRequest();
-    const sessionUrl = `chrome-extension://${extensionId}/agent.html#session=123e4567-e89b-42d3-a456-426614174000`;
     const invalidUrls = [
+      `chrome-extension://${extensionId}/index.html?agent-connect`,
       `chrome-extension://${extensionId}/agent.html`,
-      `chrome-extension://${extensionId}/agent.html?session=123e4567-e89b-42d3-a456-426614174000`,
-      `chrome-extension://${extensionId}/agent.html#session=not-a-session`,
-      `chrome-extension://${extensionId}/other.html#session=123e4567-e89b-42d3-a456-426614174000`,
+      `chrome-extension://${extensionId}/other.html`,
     ];
     for (const url of invalidUrls) {
       assert.equal(await send(request, { id: extensionId, frameId: 0, url }), undefined);
     }
     assert.equal(fetchCalls.length, 0);
-    assert.equal((await send(request, { id: extensionId, frameId: 0, url: sessionUrl })).status, 200);
+    assert.equal((await send(request, { id: extensionId, frameId: 0, url: `chrome-extension://${extensionId}/index.html` })).status, 200);
     assert.equal(fetchCalls.length, 1);
   });
 });
@@ -642,7 +641,7 @@ test("waitForDownload times out with zero listeners and rejects zero-byte termin
 
 test("manifest requests only required extension and upstream-host permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url)));
-  assert.equal(manifest.minimum_chrome_version, "101");
+  assert.equal(manifest.minimum_chrome_version, "116");
   assert.deepEqual(manifest.permissions, ["downloads", "declarativeNetRequestWithHostAccess", "nativeMessaging"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://yuanbao.tencent.com/*",
@@ -656,28 +655,375 @@ test("manifest requests only required extension and upstream-host permissions", 
   }]);
   assert.equal(manifest.background.service_worker, "background.js");
   assert.equal(manifest.action.default_popup, undefined);
+  const index = await readFile(new URL("../extension/index.html", import.meta.url), "utf8");
+  assert.match(index, /src="\.\/agent\.js"/);
+  assert.match(index, /id="agent-connect-toggle"[^>]*role="switch"[^>]*aria-checked="false"/s);
+  assert.match(index, /id="agent-connect-status"[^>]*role="status"/s);
 });
 
-test("toolbar action opens the full extension page in a new tab", async () => {
+test("toolbar action focuses the existing page or creates one", async () => {
   const previousChrome = globalThis.chrome;
   let onClicked;
-  let createdTab;
+  const focusedTabs = [];
+  const createdTabs = [];
+  let queried = [{ tabId: 42, windowId: 9 }];
+  const focusedWindows = [];
   globalThis.chrome = {
     action: { onClicked: { addListener: (listener) => { onClicked = listener; } } },
     runtime: {
       getURL: (path) => `chrome-extension://synthetic-id/${path}`,
       onMessage: { addListener() {} },
+      getContexts: async (filter) => {
+        assert.deepEqual(filter, { contextTypes: ["TAB"], documentUrls: ["chrome-extension://synthetic-id/index.html"] });
+        return queried;
+      },
     },
-    tabs: { create: (properties) => { createdTab = properties; } },
+    windows: { update: async (id, properties) => { focusedWindows.push({ id, properties }); } },
+    tabs: {
+      update: async (id, properties) => { focusedTabs.push({ id, properties }); },
+      create: async (properties) => { createdTabs.push(properties); },
+    },
     declarativeNetRequest: { updateSessionRules: async () => {} },
   };
 
   try {
     await import(`../extension/background.mjs?test=${Date.now()}`);
-    onClicked();
-    assert.deepEqual(createdTab, { url: "chrome-extension://synthetic-id/index.html" });
+    await onClicked();
+    assert.deepEqual(focusedTabs, [{ id: 42, properties: { active: true } }]);
+    assert.deepEqual(createdTabs, []);
+    assert.deepEqual(focusedWindows, [{ id: 9, properties: { focused: true } }]);
+    queried = [];
+    await onClicked();
+    assert.deepEqual(createdTabs, [{ url: "chrome-extension://synthetic-id/index.html" }]);
   } finally {
     if (previousChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = previousChrome;
+  }
+});
+
+test("agent controller ignores stale port callbacks and never routes old work to a new port", async () => {
+  const createEvent = () => {
+    const listeners = new Set();
+    return {
+      addListener(listener) { listeners.add(listener); },
+      fire(value) { for (const listener of [...listeners]) listener(value); },
+    };
+  };
+  const ports = [];
+  const chromeApi = {
+    runtime: {
+      connectNative(name) {
+        assert.equal(name, "com.mc0571.weixin_channels_video");
+        const port = {
+          onMessage: createEvent(),
+          onDisconnect: createEvent(),
+          messages: [],
+          postMessage(value) { this.messages.push(value); },
+          disconnect() { this.onDisconnect.fire(); },
+        };
+        ports.push(port);
+        return port;
+      },
+      get lastError() { return undefined; },
+    },
+  };
+  const attributes = new Map([["aria-checked", "false"]]);
+  let click;
+  const toggleButton = {
+    textContent: "",
+    addEventListener(type, listener) { assert.equal(type, "click"); click = listener; },
+    getAttribute(name) { return attributes.get(name); },
+    setAttribute(name, value) { attributes.set(name, value); },
+  };
+  const statusElement = { textContent: "" };
+  let finishOldWork;
+  const controller = createAgentConnectionController({
+    sessionId: "123e4567-e89b-42d3-a456-426614174000",
+    chromeApi,
+    toggleButton,
+    statusElement,
+    handleCommand: () => new Promise((resolve) => { finishOldWork = resolve; }),
+  });
+
+  assert.equal(toggleButton.textContent, "开启 AI 连接");
+  assert.equal(attributes.get("aria-checked"), "false");
+  assert.match(statusElement.textContent, /首次使用/);
+  click();
+  const oldPort = ports[0];
+  oldPort.onMessage.fire({ type: "ready", version: 1 });
+  assert.equal(statusElement.textContent, "AI 助手已连接，使用期间请保留此页面。");
+  oldPort.onMessage.fire({ id: "323e4567-e89b-42d3-a456-426614174000", command: "status" });
+  await Promise.resolve();
+
+  click();
+  click();
+  const newPort = ports[1];
+  newPort.onMessage.fire({ type: "ready", version: 1 });
+  oldPort.onMessage.fire({ type: "ready", version: 1 });
+  oldPort.onDisconnect.fire();
+  assert.equal(controller.isConnected(), true);
+  assert.equal(attributes.get("aria-checked"), "true");
+  assert.equal(statusElement.textContent, "AI 助手已连接，使用期间请保留此页面。");
+
+  finishOldWork({ id: "323e4567-e89b-42d3-a456-426614174000", ok: true, result: { login: "anonymous" } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(oldPort.messages, [{ type: "hello", version: 1, sessionId: "123e4567-e89b-42d3-a456-426614174000" }]);
+  assert.deepEqual(newPort.messages, [{ type: "hello", version: 1, sessionId: "123e4567-e89b-42d3-a456-426614174000" }]);
+});
+
+test("agent controller resets after hello send failure and can reconnect", () => {
+  const createEvent = () => ({ addListener() {}, fire() {} });
+  let attempts = 0;
+  const chromeApi = {
+    runtime: {
+      connectNative: () => {
+        attempts += 1;
+        return {
+          onMessage: createEvent(),
+          onDisconnect: createEvent(),
+          disconnect() {},
+          postMessage() { if (attempts === 1) throw new Error("synthetic post failure"); },
+        };
+      },
+    },
+  };
+  const attributes = new Map([ ["aria-checked", "false"] ]);
+  let click;
+  const toggleButton = {
+    textContent: "",
+    addEventListener(_type, listener) { click = listener; },
+    getAttribute(name) { return attributes.get(name); },
+    setAttribute(name, value) { attributes.set(name, value); },
+  };
+  const statusElement = { textContent: "" };
+  const controller = createAgentConnectionController({ sessionId: "123e4567-e89b-42d3-a456-426614174000", chromeApi, toggleButton, statusElement, handleCommand: async () => ({}) });
+
+  click();
+  assert.equal(attempts, 1);
+  assert.equal(controller.isConnected(), false);
+  assert.equal(attributes.get("aria-checked"), "false");
+  assert.match(statusElement.textContent, /检查本地连接组件/);
+  click();
+  assert.equal(attempts, 2);
+  assert.equal(controller.isConnected(), true);
+  assert.equal(attributes.get("aria-checked"), "true");
+});
+
+test("agent controller resets and reconnects when a command response cannot be sent", async () => {
+  const createEvent = () => {
+    const listeners = new Set();
+    return {
+      addListener(listener) { listeners.add(listener); },
+      fire(value) { for (const listener of [...listeners]) listener(value); },
+    };
+  };
+  const ports = [];
+  const chromeApi = {
+    runtime: {
+      connectNative: () => {
+        const port = {
+          onMessage: createEvent(),
+          onDisconnect: createEvent(),
+          disconnectCount: 0,
+          messages: [],
+          postMessage(value) {
+            if (value.type !== "hello") throw new Error("synthetic response send failure");
+            this.messages.push(value);
+          },
+          disconnect() { this.disconnectCount += 1; this.onDisconnect.fire(); },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+  };
+  const attributes = new Map([["aria-checked", "false"]]);
+  let click;
+  const toggleButton = {
+    textContent: "",
+    addEventListener(_type, listener) { click = listener; },
+    getAttribute(name) { return attributes.get(name); },
+    setAttribute(name, value) { attributes.set(name, value); },
+  };
+  const statusElement = { textContent: "" };
+  const controller = createAgentConnectionController({
+    sessionId: "123e4567-e89b-42d3-a456-426614174000",
+    chromeApi,
+    toggleButton,
+    statusElement,
+    handleCommand: async (request) => ({ id: request.id, ok: true, result: {} }),
+  });
+
+  click();
+  const failedPort = ports[0];
+  failedPort.onMessage.fire({ type: "ready", version: 1 });
+  failedPort.onMessage.fire({ id: "323e4567-e89b-42d3-a456-426614174000", command: "status" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.isConnected(), false);
+  assert.equal(failedPort.disconnectCount, 1);
+  assert.equal(attributes.get("aria-checked"), "false");
+  assert.match(statusElement.textContent, /检查本地连接组件/);
+
+  click();
+  assert.equal(controller.isConnected(), true);
+  assert.equal(ports.length, 2);
+});
+
+
+test("unpaired pages never launch the native host", () => {
+  let launches = 0;
+  const statusElement = { textContent: "" };
+  const chromeApi = { runtime: { connectNative: () => { launches += 1; } } };
+  for (const sessionId of [undefined, "not-a-session"]) {
+    const controller = createAgentConnectionController({ chromeApi, sessionId, statusElement });
+    controller.connect();
+    assert.equal(controller.isConnected(), false);
+    assert.match(statusElement.textContent, /首次连接/);
+  }
+  assert.equal(launches, 0);
+});
+
+test("CLI pairing reuses a user page without starting a second native host", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const url = "chrome-extension://synthetic-id/index.html";
+  const stored = new Map([["unrelated", "preserve"]]);
+  const attributes = new Map();
+  const statusElement = {};
+  const toggleButton = { addEventListener() {}, setAttribute: (key, value) => attributes.set(key, value) };
+  const callbacks = new Map();
+  const calls = [];
+  let nativeStarts = 0;
+  const windowApi = {
+    location: { hash: `#agent-connect=${sessionId}` },
+    history: { replaceState(_state, _title, value) { calls.push(["clean", value]); windowApi.location.hash = ""; } },
+    localStorage: { setItem: (key, value) => stored.set(key, value), getItem: (key) => stored.get(key) },
+    addEventListener: (type, handler) => callbacks.set(type, handler),
+  };
+  const chromeApi = {
+    runtime: {
+      getURL: () => url,
+      getContexts: async () => [{ tabId: 1, windowId: 5 }, { tabId: 2, windowId: 6 }],
+      connectNative: () => { nativeStarts += 1; throw new Error("must not start before handoff"); },
+    },
+    tabs: {
+      getCurrent: async () => ({ id: 2 }),
+      update: async (id, options) => calls.push(["update", id, options]),
+      remove: async (id) => calls.push(["remove", id]),
+    },
+    windows: { update: async (id, options) => calls.push(["focus", id, options]) },
+  };
+  await startAgent({ chromeApi, windowApi, documentApi: { querySelector: (selector) => selector.endsWith("toggle") ? toggleButton : statusElement } });
+  assert.deepEqual(calls, [
+    ["clean", url],
+    ["update", 1, { url: `${url}#agent-connect=${sessionId}`, active: true }],
+    ["focus", 5, { focused: true }],
+    ["remove", 2],
+  ]);
+  assert.equal(nativeStarts, 0);
+  assert.equal(stored.get("unrelated"), "preserve");
+  assert.equal(stored.get("weixin-channels-video:bridge-session"), sessionId);
+});
+
+test("existing user page accepts pairing without reload and reads it on subsequent toggles", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const storage = new Map();
+  const listeners = new Map();
+  const attributes = new Map();
+  let click;
+  const toggleButton = {
+    addEventListener(_type, callback) { click = callback; },
+    setAttribute: (key, value) => attributes.set(key, value),
+    getAttribute: (key) => attributes.get(key),
+  };
+  const statusElement = {};
+  const hellos = [];
+  const windowApi = {
+    location: { hash: "#ordinary-fragment" },
+    history: { replaceState() { windowApi.location.hash = ""; } },
+    localStorage: { setItem: (key, value) => storage.set(key, value), getItem: (key) => storage.get(key) },
+    addEventListener: (type, callback) => listeners.set(type, callback),
+  };
+  const chromeApi = {
+    runtime: {
+      getURL: () => "chrome-extension://synthetic-id/index.html",
+      connectNative: () => ({
+        onMessage: { addListener() {} }, onDisconnect: { addListener() {} },
+        postMessage: (value) => hellos.push(value), disconnect() {},
+      }),
+    },
+  };
+  const controller = await startAgent({ chromeApi, windowApi, documentApi: { querySelector: (selector) => selector.endsWith("toggle") ? toggleButton : statusElement } });
+  assert.equal(controller.isConnected(), false);
+  assert.equal(storage.size, 0);
+  windowApi.location.hash = `#agent-connect=${sessionId}`;
+  listeners.get("hashchange")();
+  assert.equal(controller.isConnected(), true);
+  assert.equal(windowApi.location.hash, "");
+  windowApi.location.hash = `#agent-connect=${sessionId}`;
+  listeners.get("hashchange")();
+  assert.equal(hellos.length, 1, "repeated pairing reuses the live native port");
+  click();
+  click();
+  assert.deepEqual(hellos, Array(2).fill({ type: "hello", version: 1, sessionId }));
+});
+
+test("concurrent CLI pages choose one winner and never close each other", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const url = "chrome-extension://synthetic-id/index.html";
+  const removed = [];
+  const updated = [];
+  const started = [];
+  const contexts = [{ tabId: 7, windowId: 1 }, { tabId: 8, windowId: 1 }];
+  await Promise.all(contexts.map(async ({ tabId }) => {
+    const storage = new Map();
+    const windowApi = {
+      location: { hash: `#agent-connect=${sessionId}` },
+      history: { replaceState() { windowApi.location.hash = ""; } },
+      localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+      addEventListener() {},
+    };
+    await startAgent({
+      windowApi,
+      documentApi: { querySelector: () => ({ setAttribute() {}, addEventListener() {} }) },
+      chromeApi: {
+        runtime: {
+          getURL: () => url,
+          getContexts: async () => contexts,
+          connectNative: () => {
+            started.push(tabId);
+            return { onMessage: { addListener() {} }, onDisconnect: { addListener() {} }, postMessage() {}, disconnect() {} };
+          },
+        },
+        tabs: {
+          getCurrent: async () => ({ id: tabId }),
+          update: async (id) => updated.push(id),
+          remove: async (id) => removed.push(id),
+        },
+        windows: { update: async () => {} },
+      },
+    });
+  }));
+  assert.deepEqual(started, [7]);
+  assert.deepEqual(updated, [7]);
+  assert.deepEqual(removed, [8]);
+});
+
+test("pairing storage failure closes an existing connection before reporting off", () => {
+  for (const brokenRead of [() => undefined, () => { throw new Error("blocked storage"); }]) {
+    let readSession = () => "123e4567-e89b-42d3-a456-426614174000";
+    let disconnects = 0;
+    const controller = createAgentConnectionController({
+      readSession: () => readSession(),
+      chromeApi: { runtime: { connectNative: () => ({
+        onMessage: { addListener() {} }, onDisconnect: { addListener() {} },
+        postMessage() {}, disconnect() { disconnects += 1; },
+      }) } },
+    });
+    controller.connect();
+    assert.equal(controller.isConnected(), true);
+    readSession = brokenRead;
+    controller.connect();
+    assert.equal(controller.isConnected(), false);
+    assert.equal(disconnects, 1);
   }
 });

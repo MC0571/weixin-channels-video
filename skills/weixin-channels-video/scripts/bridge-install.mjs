@@ -143,12 +143,14 @@ export async function installBridge({
   }
   const existingConfig = await inspectExisting(configPath);
   let ownsConfig = false;
+  let existingConfigValue;
   if (existingConfig !== undefined) {
     const value = readJson(existingConfig, "Existing bridge configuration");
     if (!isOwnedConfig(value, root)) {
       throw new BridgeSetupError("BRIDGE_FILE_CONFLICT", "检测到不属于本工具的本地连接配置，已保留原文件。");
     }
     ownsConfig = true;
+    existingConfigValue = value;
   }
   const existingHost = await inspectExisting(hostPath);
   const existingLauncher = await inspectExisting(launcherPath);
@@ -156,6 +158,9 @@ export async function installBridge({
     throw new BridgeSetupError("BRIDGE_FILE_CONFLICT", "检测到不属于本工具的本地桥接文件，已保留原文件。");
   }
   const existingSession = await inspectExisting(sessionPath);
+  if (existingSession !== undefined && !ownsConfig && !ownsManifest) {
+    throw new BridgeSetupError("BRIDGE_FILE_CONFLICT", "检测到不属于本工具的本地连接会话，已保留原文件。");
+  }
   let registryInfo;
   try { registryInfo = await lstat(registrationDir); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -179,6 +184,20 @@ export async function installBridge({
     configPath,
     sessionPath,
   };
+  const sameConfiguration = ownsConfig &&
+    existingConfigValue.extensionId === config.extensionId &&
+    existingConfigValue.profileDirectory === config.profileDirectory &&
+    resolve(existingConfigValue.chromeUserDataDir ?? "") === config.chromeUserDataDir;
+  let sessionId;
+  if (sameConfiguration && existingSession !== undefined) {
+    try {
+      const previousSession = JSON.parse(existingSession);
+      if (previousSession?.version === 1 && SESSION_ID_PATTERN.test(previousSession.sessionId)) {
+        sessionId = previousSession.sessionId;
+      }
+    } catch { /* Replace invalid owned session state with a fresh identifier. */ }
+  }
+  sessionId ??= randomUUID();
   const hostManifest = {
     name: NATIVE_HOST_NAME,
     description: HOST_DESCRIPTION,
@@ -193,7 +212,7 @@ export async function installBridge({
   await atomicWrite(hostPath, nativeHostBundle, 0o600, { replace: true });
   await atomicWrite(launcherPath, launcher, 0o700, { replace: true });
   await atomicWrite(configPath, `${JSON.stringify(config, null, 2)}\n`, 0o600, { replace: true });
-  if (existingSession !== undefined) await rm(sessionPath, { force: true });
+  await atomicWrite(sessionPath, `${JSON.stringify({ version: 1, sessionId })}\n`, 0o600, { replace: existingSession !== undefined });
   await atomicWrite(manifestPath, `${JSON.stringify(hostManifest, null, 2)}\n`, 0o600, { replace: existingManifestText !== undefined });
 
   return { config, hostManifestPath: manifestPath, launcherPath, profile: selectedProfile };
@@ -218,13 +237,6 @@ export async function readBridgeInstallation({ appSupportDir = defaultAppSupport
     resolve(value.appSupportDir) !== resolve(appSupportDir)
   ) throw new BridgeSetupError("BRIDGE_CONFIG_INVALID", "本地连接配置无效，请重新运行 install-bridge。");
   return value;
-}
-
-export async function writeBridgeSession(config, sessionId = randomUUID()) {
-  if (!config?.appSupportDir || !SESSION_ID_PATTERN.test(sessionId)) throw new Error("Bridge session is invalid.");
-  await ensurePrivateDirectory(config.appSupportDir);
-  await atomicWrite(join(config.appSupportDir, "session.json"), `${JSON.stringify({ version: 1, sessionId })}\n`, 0o600, { replace: true });
-  return sessionId;
 }
 
 export function bridgeSocketPath(config, sessionId) {

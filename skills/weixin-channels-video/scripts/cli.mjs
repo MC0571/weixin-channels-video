@@ -6,7 +6,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PARSE_ERROR_MESSAGES } from "../../../src/core.mjs";
 import { BRIDGE_ERROR_MESSAGES, isSafeRelativeMp4Filename, validateBridgeCommand } from "../../../src/native-messaging.mjs";
-import { BridgeSetupError, installBridge, listBridgeProfiles, readBridgeInstallation, readBridgeSession, writeBridgeSession } from "./bridge-install.mjs";
+import { BridgeSetupError, installBridge, listBridgeProfiles, readBridgeInstallation, readBridgeSession } from "./bridge-install.mjs";
 import { BridgeError, requestBridge, waitForBridge } from "./bridge-client.mjs";
 
 const USAGE = "Usage: cli.mjs list-profiles | install-bridge --extension-id ID --profile NAME | status | connect | parse --url URL | download --url URL [--filename RELATIVE.mp4]";
@@ -42,7 +42,7 @@ function parseArguments(command, args) {
 }
 
 async function launchChrome(config, sessionId) {
-  const url = `chrome-extension://${config.extensionId}/agent.html#session=${sessionId}`;
+  const url = `chrome-extension://${config.extensionId}/index.html#agent-connect=${sessionId}`;
   const child = spawn(CHROME_EXECUTABLE, [
     `--user-data-dir=${config.chromeUserDataDir}`,
     `--profile-directory=${config.profileDirectory}`,
@@ -64,7 +64,6 @@ export async function runCli(argv, {
   listProfiles = listBridgeProfiles,
   readInstallation = readBridgeInstallation,
   readSession = readBridgeSession,
-  writeSession = writeBridgeSession,
   bridgeRequest = requestBridge,
   bridgeWait = waitForBridge,
 } = {}) {
@@ -134,20 +133,16 @@ export async function runCli(argv, {
     }
 
     if (command === "connect") {
-      if (sessionId) {
-        try {
-          await bridgeWait(config, sessionId, { timeoutMs: 500 });
-          stdout("Connected to the Chrome extension.");
-          return 0;
-        } catch (error) {
-          if (error instanceof BridgeError && error.code !== "BRIDGE_TIMEOUT") throw error;
-          // A timed-out session can be replaced; other bridge failures need attention.
-        }
+      if (!sessionId) throw new BridgeError("BRIDGE_NOT_CONFIGURED", BRIDGE_ERROR_MESSAGES.BRIDGE_NOT_CONFIGURED);
+      try {
+        await bridgeWait(config, sessionId, { timeoutMs: 500 });
+        stdout("Connected to the Chrome extension.");
+        return 0;
+      } catch (error) {
+        if (!(error instanceof BridgeError) || error.code !== "BRIDGE_TIMEOUT") throw error;
       }
-      const nextSessionId = randomUUID();
-      await writeSession(config, nextSessionId);
-      await launch(config, nextSessionId);
-      await bridgeWait(config, nextSessionId, { timeoutMs: 30_000 });
+      await launch(config, sessionId);
+      await bridgeWait(config, sessionId, { timeoutMs: 30_000 });
       stdout("Connected to the Chrome extension.");
       return 0;
     }

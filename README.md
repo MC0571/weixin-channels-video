@@ -49,7 +49,7 @@ https://weixin.qq.com/sph/你的分享链接
 Agent → Skill CLI → 本地桥接 → Chrome 扩展 → 解析与下载
 ```
 
-Skill 不操作元宝或视频号页面，不读取 Chrome Cookie 数据库，不需要 Python、`Chrome Safe Storage` 钥匙串授权、Docker、远程解析服务或 Codex Chrome 插件。运行要求是 macOS、本机 Chrome 和 Node.js 24+；Chrome 必须可运行且扩展所在 profile 已登录元宝。
+Skill 不操作元宝或视频号页面，不读取 Chrome Cookie 数据库，不需要 Python、`Chrome Safe Storage` 钥匙串授权、Docker、远程解析服务或 Codex Chrome 插件。运行要求是 macOS、本机 Chrome 和 Node.js 24+；需要 Chrome 116+，扩展所在 profile 已登录元宝。
 
 首次使用时，Agent 检测已有安装和连接。缺少插件或桥接时，说明来源、站点访问与下载权限，以及新增的 `nativeMessaging` 权限，取得用户授权后协助安装：
 
@@ -75,7 +75,9 @@ node scripts/cli.mjs download --url 'https://weixin.qq.com/sph/你的分享链�
 
 `install-bridge` 注册 Chrome 用户级 Native Messaging host 和本工具的私有配置，不修改 Chrome profile 设置或读取 Cookie。桥接目录权限为 `0700`，配置与本地 Unix socket 为 `0600`，host 仅接受已登记的扩展 ID。桥接传递固定任务和结果，不提供任意网址请求或 JavaScript 执行接口。
 
-`connect` 在所选 profile 中打开扩展自己的 Agent 连接页面，Chrome 通过该页面启动本地桥接；使用期间保持此页面打开。无需打开元宝或视频号标签页。`status` 区分未安装、未连接、已登录、未登录与登录检查失败；网络或响应异常不会被当作未登录。
+在插件主页面的“连接 AI 助手”区域点击开关，即可开启、关闭和重新开启连接，无需手动运行命令。默认关闭，手动解析与下载可以照常使用；首次尚未配置时，让 AI 助手协助安装本地连接组件并初始化此 profile 的连接。配对保存在该 profile 的插件内，其他 profile 不能直接使用这份连接。使用 AI 时保留主页面，关闭或刷新页面会断开连接。关闭连接不会取消已接收的任务或已开始的下载。
+
+`connect` 复用已有连接；未连接时在所选 profile 中打开插件主页面并自动开启连接。Chrome 由此启动本地桥接，无需单独的连接页面、元宝或视频号标签页。`status` 区分未安装、未连接、已登录、未登录与登录检查失败；网络或响应异常不会被当作未登录。
 
 `download` 默认使用共享核心选定的视频版本，`--filename` 指定 Chrome 下载目录内的相对文件名，省略时由标题生成。保存位置与位置选择遵循 Chrome 下载设置，重名时自动改名；命令等待 Chrome 报告下载完成后返回最终文件路径与字节数，中断或超时返回错误。它不支持任意绝对输出路径。
 
@@ -162,7 +164,7 @@ curl --fail-with-body http://localhost:3000/parse \
 
 解析时无需打开元宝或视频号上游标签页。元宝解析仍使用隐藏 iframe 和浏览器会话；浏览器按 iframe 的 SameSite 与第三方 Cookie 策略决定是否携带元宝 Cookie。受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。
 
-视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；验证消息只接受扩展自己的 `index.html` 和 `agent.html` 页面，并核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 101+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。当前只有本机合成响应验证，真实视频号接口是否接受这些请求头尚未验证。
+视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；验证消息只接受扩展自己的 `index.html` 页面，并核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 116+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。当前只有本机合成响应验证，真实视频号接口是否接受这些请求头尚未验证。
 
 扩展申请下载、`declarativeNetRequestWithHostAccess`、与本地桥接通信的 `nativeMessaging` 及访问两个上游站点所需的 host permissions。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
