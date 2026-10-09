@@ -5,6 +5,147 @@ const ENDPOINTS = new Map([
   [API_URLS.parseShare, { method: "POST", host: "yuanbao.tencent.com" }],
   [API_URLS.feedInfo, { method: "POST", host: "channels.weixin.qq.com" }],
 ]);
+const CHANNELS_ORIGIN = "https://channels.weixin.qq.com";
+const CHANNELS_FEED_PAGE_PATH = "/finder-preview/pages/feed";
+const CHANNELS_FEED_API_PATH = "/finder-preview/api/feed/get_feed_info";
+const CHANNELS_FEED_PAGE_URL = `${CHANNELS_ORIGIN}${CHANNELS_FEED_PAGE_PATH}`;
+const TAB_LOAD_TIMEOUT_MS = 15_000;
+
+function parseFeedPageUrl(value) {
+  try {
+    const url = new URL(value);
+    if (
+      url.origin !== CHANNELS_ORIGIN ||
+      url.pathname !== CHANNELS_FEED_PAGE_PATH ||
+      url.username ||
+      url.password ||
+      url.hash
+    ) {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function waitForTabComplete(chromeApi, tabId) {
+  return new Promise((resolve, reject) => {
+    const { tabs } = chromeApi;
+    let settled = false;
+    let timeout;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      tabs.onUpdated.removeListener(onUpdated);
+      tabs.onRemoved.removeListener(onRemoved);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const checkTab = async () => {
+      try {
+        const tab = await tabs.get(tabId);
+        if (tab.status === "complete") finish(resolve, tab);
+      } catch (error) {
+        finish(reject, error);
+      }
+    };
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") void checkTab();
+    };
+    const onRemoved = (removedTabId) => {
+      if (removedTabId === tabId) finish(reject, new Error("Feed page tab was closed"));
+    };
+
+    tabs.onUpdated.addListener(onUpdated);
+    tabs.onRemoved.addListener(onRemoved);
+    timeout = setTimeout(
+      () => finish(reject, new Error("Feed page load timed out")),
+      TAB_LOAD_TIMEOUT_MS,
+    );
+    void checkTab();
+  });
+}
+
+async function closeCreatedTab(chromeApi, tabId) {
+  try {
+    await chromeApi.tabs.remove(tabId);
+  } catch (error) {
+    try {
+      await chromeApi.tabs.get(tabId);
+    } catch {
+      return;
+    }
+    throw error;
+  }
+}
+
+function responseFromPageResult(result) {
+  if (!result || !Number.isInteger(result.status) || typeof result.body !== "string") {
+    throw new TypeError("The page request returned an invalid response");
+  }
+  return new Response([204, 205, 304].includes(result.status) ? null : result.body, {
+    status: result.status,
+  });
+}
+
+async function requestFeedInfoInPage(chromeApi, url, init, referer) {
+  let tabId;
+  try {
+    const tab = await chromeApi.tabs.create({ url: CHANNELS_FEED_PAGE_URL, active: false });
+    tabId = tab?.id;
+    if (typeof tabId !== "number") throw new Error("Feed page tab could not be created");
+
+    const loadedTab = await waitForTabComplete(chromeApi, tabId);
+    if (!parseFeedPageUrl(loadedTab.url)) throw new Error("Feed page redirected outside its fixed path");
+
+    const [injection] = await chromeApi.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: async ({ url, body, referer }) => {
+        const origin = "https://channels.weixin.qq.com";
+        const pagePath = "/finder-preview/pages/feed";
+        const apiPath = "/finder-preview/api/feed/get_feed_info";
+        const target = new URL(url);
+        const requestReferer = new URL(referer);
+        if (
+          location.origin !== origin ||
+          location.pathname !== pagePath ||
+          target.origin !== origin ||
+          target.pathname !== apiPath ||
+          requestReferer.origin !== origin ||
+          requestReferer.pathname !== pagePath
+        ) {
+          throw new Error("Feed page or API origin changed before parsing");
+        }
+
+        const response = await fetch(target.href, {
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body,
+          credentials: "omit",
+          redirect: "error",
+          referrer: requestReferer.href,
+          referrerPolicy: "same-origin",
+        });
+        return {
+          status: response.status,
+          body: response.ok ? await response.text() : "",
+        };
+      },
+      args: [{ url: url.href, body: init.body, referer }],
+    });
+    return responseFromPageResult(injection?.result);
+  } catch {
+    throw new ParseError("UPSTREAM_ERROR", "视频详情页面请求失败。");
+  } finally {
+    if (typeof tabId === "number") await closeCreatedTab(chromeApi, tabId);
+  }
+}
 
 export function createExtensionRequest(fetchImpl = globalThis.fetch, chromeApi = globalThis.chrome) {
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
@@ -55,8 +196,13 @@ export function createExtensionRequest(fetchImpl = globalThis.fetch, chromeApi =
         },
         args: [init.body],
       });
-      const { status, body } = injection.result;
-      return new Response([204, 205, 304].includes(status) ? null : body, { status });
+      return responseFromPageResult(injection?.result);
+    }
+
+    if (endpoint.host === "channels.weixin.qq.com") {
+      const referer = parseFeedPageUrl(new Headers(init.headers).get("referer"));
+      if (!referer) throw new TypeError("The feed page referer is invalid");
+      return requestFeedInfoInPage(chromeApi, url, init, referer.href);
     }
 
     const headers = new Headers(init.headers);

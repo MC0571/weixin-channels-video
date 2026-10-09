@@ -104,22 +104,24 @@ function validateShareUrl(value) {
   return url;
 }
 
-async function readJson(request, url, init, code, authCode) {
+async function readJson(request, url, init, code, authCode, stepName) {
   let response;
   try {
     response = await request(url, init);
   } catch (error) {
     if (error instanceof ParseError) throw error;
-    fail(code);
+    throw new ParseError(code, `${stepName}请求失败。`);
   }
 
   if (authCode && response?.status === 401) {
     fail(authCode);
   }
-  if (authCode && response?.status === 403) {
-    throw new ParseError(code, "元宝拒绝解析请求（HTTP 403）。");
+  if (response?.ok !== true) {
+    if (Number.isInteger(response?.status) && response.status >= 400 && response.status <= 599) {
+      throw new ParseError(code, `${stepName}接口请求失败（HTTP ${response.status}）。`);
+    }
+    fail(code);
   }
-  if (response?.ok !== true) fail(code);
 
   let result;
   try {
@@ -224,6 +226,7 @@ export async function parseShareLink(value, options = {}) {
     },
     "UPSTREAM_ERROR",
     "AUTH_EXPIRED",
+    "元宝解析",
   );
   if (parsed.code !== undefined && parsed.code !== 0) fail("UPSTREAM_ERROR");
 
@@ -257,6 +260,8 @@ export async function parseShareLink(value, options = {}) {
       body: JSON.stringify({ baseReq: { generalToken }, exportId }),
     },
     "UPSTREAM_ERROR",
+    undefined,
+    "视频详情",
   );
   feedUnavailable(feed);
 

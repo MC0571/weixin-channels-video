@@ -145,7 +145,34 @@ test("parseShareLink distinguishes authentication failure from a forbidden parse
     parseShareLink("https://weixin.qq.com/sph/share-id", { request: makeRequest(403) }),
     (error) => {
       assert.equal(error.code, "UPSTREAM_ERROR");
-      assert.equal(error.message, "元宝拒绝解析请求（HTTP 403）。");
+      assert.equal(error.message, "元宝解析接口请求失败（HTTP 403）。");
+      return true;
+    },
+  );
+});
+
+test("parseShareLink reports feed HTTP status without treating it as Yuanbao authentication failure", async () => {
+  const secret = "synthetic-feed-token";
+  const request = async (url) => {
+    if (url === API_URLS.userInfo) return authenticatedResponse();
+    if (url === API_URLS.parseShare) {
+      return response({
+        code: 0,
+        data: {
+          playable_url: `https://channels.weixin.qq.com/finder-preview/pages/feed?token=${secret}&eid=synthetic-eid`,
+        },
+      });
+    }
+    return new Response("synthetic private failure body", { status: 401 });
+  };
+
+  await assert.rejects(
+    parseShareLink("https://weixin.qq.com/sph/share-id", { request }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_ERROR");
+      assert.equal(error.message, "视频详情接口请求失败（HTTP 401）。");
+      assert.equal(error.message.includes(secret), false);
+      assert.equal(error.message.includes("synthetic private failure body"), false);
       return true;
     },
   );

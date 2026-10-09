@@ -10,6 +10,18 @@ import {
 } from "../extension/app.mjs";
 import { API_URLS, parseShareLink } from "../src/core.mjs";
 
+function createEvent() {
+  const listeners = new Set();
+  return {
+    addListener(listener) { listeners.add(listener); },
+    removeListener(listener) { listeners.delete(listener); },
+    dispatch(...args) {
+      for (const listener of listeners) listener(...args);
+    },
+    get listenerCount() { return listeners.size; },
+  };
+}
+
 test("extension requests only fixed APIs with isolated credentials and browser-owned headers", async () => {
   const calls = [];
   const request = createExtensionRequest(async (url, init) => {
@@ -33,17 +45,9 @@ test("extension requests only fixed APIs with isolated credentials and browser-o
   assert.equal(calls[0].init.headers.has("cookie"), false);
   assert.equal(calls[0].init.headers.has("authorization"), false);
 
-  await request(`${API_URLS.feedInfo}?_rid=synthetic-rid`, {
-    method: "POST",
-    credentials: "include",
-    headers: { referer: "https://channels.weixin.qq.com/?token=synthetic-token" },
-    body: "{}",
-  });
-  assert.equal(calls[1].init.credentials, "omit");
-  assert.equal(calls[1].init.headers.has("referer"), false);
   await assert.rejects(request("https://attacker.example/collect", { method: "POST" }), TypeError);
   await assert.rejects(request(API_URLS.userInfo, { method: "POST" }), TypeError);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
 });
 
 test("parseShare requests run in the open Yuanbao tab and return only serializable response data", async () => {
@@ -135,6 +139,198 @@ test("parseShare injection does not request when the selected tab has navigated 
     if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
     else delete globalThis.location;
   }
+});
+
+test("feed requests use a temporary same-origin preview tab and the core token referer", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
+  const onUpdated = createEvent();
+  const onRemoved = createEvent();
+  const expectedReferer =
+    "https://channels.weixin.qq.com/finder-preview/pages/feed?entry_card_type=48&comment_scene=39&appid=0&token=synthetic-token&eid=synthetic-eid";
+  const feedPageUrl = "https://channels.weixin.qq.com/finder-preview/pages/feed";
+  const feedUrl = new URL(API_URLS.feedInfo);
+  feedUrl.searchParams.set("_rid", "synthetic-rid");
+  feedUrl.searchParams.set("_pageUrl", feedPageUrl);
+  const body = JSON.stringify({ baseReq: { generalToken: "synthetic-token" }, exportId: "synthetic-eid" });
+  let createdTab;
+  let currentTab;
+  let removedTabs = [];
+  let pageRequest;
+  let injection;
+
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { origin: "https://channels.weixin.qq.com", pathname: "/finder-preview/pages/feed" },
+  });
+  globalThis.fetch = async (url, init) => {
+    pageRequest = { url, init };
+    return Response.json({ errCode: 0 });
+  };
+  const chromeApi = {
+    tabs: {
+      create: async (options) => {
+        createdTab = options;
+        currentTab = { id: 73, status: "loading", url: options.url };
+        setTimeout(() => {
+          if (!currentTab) return;
+          currentTab = { ...currentTab, status: "complete" };
+          onUpdated.dispatch(73, { status: "complete" }, currentTab);
+        }, 0);
+        return currentTab;
+      },
+      get: async (tabId) => {
+        assert.equal(tabId, 73);
+        if (!currentTab) throw new Error("No tab with id: 73");
+        return currentTab;
+      },
+      remove: async (tabId) => {
+        removedTabs.push(tabId);
+        currentTab = null;
+      },
+      onUpdated,
+      onRemoved,
+    },
+    scripting: {
+      executeScript: async (details) => {
+        injection = details;
+        return [{ result: await details.func(...details.args) }];
+      },
+    },
+  };
+  const request = createExtensionRequest(async () => assert.fail("feed must use the preview tab"), chromeApi);
+
+  try {
+    const response = await request(feedUrl.href, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        origin: "https://channels.weixin.qq.com",
+        referer: expectedReferer,
+        cookie: "must-not-be-sent",
+      },
+      body,
+      credentials: "include",
+    });
+
+    assert.deepEqual(createdTab, { url: feedPageUrl, active: false });
+    assert.equal(createdTab.url.includes("synthetic-token"), false);
+    assert.equal(injection.target.tabId, 73);
+    assert.equal(injection.world, "MAIN");
+    assert.equal(pageRequest.url, feedUrl.href);
+    assert.deepEqual(pageRequest.init, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body,
+      credentials: "omit",
+      redirect: "error",
+      referrer: expectedReferer,
+      referrerPolicy: "same-origin",
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { errCode: 0 });
+    assert.deepEqual(removedTabs, [73]);
+    assert.equal(onUpdated.listenerCount, 0);
+    assert.equal(onRemoved.listenerCount, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
+    else delete globalThis.location;
+  }
+});
+
+test("feed requests close their temporary tab and do not inject after a page redirect", async () => {
+  const onUpdated = createEvent();
+  const onRemoved = createEvent();
+  let removedTab;
+  let injected = false;
+  const chromeApi = {
+    tabs: {
+      create: async () => ({ id: 74, status: "complete", url: "https://attacker.example/" }),
+      get: async () => ({ id: 74, status: "complete", url: "https://attacker.example/" }),
+      remove: async (tabId) => { removedTab = tabId; },
+      onUpdated,
+      onRemoved,
+    },
+    scripting: { executeScript: async () => { injected = true; } },
+  };
+  const request = createExtensionRequest(async () => assert.fail("feed must use the preview tab"), chromeApi);
+  const feedUrl = new URL(API_URLS.feedInfo);
+  feedUrl.searchParams.set("_rid", "synthetic-rid");
+  feedUrl.searchParams.set("_pageUrl", "https://channels.weixin.qq.com/finder-preview/pages/feed");
+
+  await assert.rejects(
+    request(feedUrl.href, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        referer: "https://channels.weixin.qq.com/finder-preview/pages/feed?token=synthetic-token&eid=synthetic-eid",
+      },
+      body: "{}",
+    }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_ERROR");
+      assert.equal(error.message, "视频详情页面请求失败。");
+      return true;
+    },
+  );
+  assert.equal(injected, false);
+  assert.equal(removedTab, 74);
+  assert.equal(onUpdated.listenerCount, 0);
+  assert.equal(onRemoved.listenerCount, 0);
+});
+
+test("feed requests stop and remove listeners when the temporary tab is closed while loading", async () => {
+  const onUpdated = createEvent();
+  const onRemoved = createEvent();
+  let currentTab = { id: 75, status: "loading", url: "https://channels.weixin.qq.com/finder-preview/pages/feed" };
+  let injected = false;
+  const chromeApi = {
+    tabs: {
+      create: async () => {
+        setTimeout(() => {
+          currentTab = null;
+          onRemoved.dispatch(75);
+        }, 0);
+        return currentTab;
+      },
+      get: async () => {
+        if (!currentTab) throw new Error("No tab with id: 75");
+        return currentTab;
+      },
+      remove: async () => {
+        if (!currentTab) throw new Error("No tab with id: 75");
+        currentTab = null;
+      },
+      onUpdated,
+      onRemoved,
+    },
+    scripting: { executeScript: async () => { injected = true; } },
+  };
+  const request = createExtensionRequest(async () => assert.fail("feed must use the preview tab"), chromeApi);
+  const feedUrl = new URL(API_URLS.feedInfo);
+  feedUrl.searchParams.set("_rid", "synthetic-rid");
+  feedUrl.searchParams.set("_pageUrl", "https://channels.weixin.qq.com/finder-preview/pages/feed");
+
+  await assert.rejects(
+    request(feedUrl.href, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        referer: "https://channels.weixin.qq.com/finder-preview/pages/feed?token=synthetic-token&eid=synthetic-eid",
+      },
+      body: "{}",
+    }),
+    (error) => {
+      assert.equal(error.code, "UPSTREAM_ERROR");
+      assert.equal(error.message, "视频详情页面请求失败。");
+      return true;
+    },
+  );
+  assert.equal(injected, false);
+  assert.equal(onUpdated.listenerCount, 0);
+  assert.equal(onRemoved.listenerCount, 0);
 });
 
 test("parseShare requests explain when no Yuanbao tab is open and leave other requests unchanged", async () => {
