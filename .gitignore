@@ -1,6 +1,7 @@
 node_modules/
 dist/
 extension/app.js
+extension/background.js
 .wrangler/
 .venv/
 __pycache__/

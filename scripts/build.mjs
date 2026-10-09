@@ -28,6 +28,11 @@ await build({
   outfile: join(root, 'extension/app.js'),
   bundle: true, platform: 'browser', format: 'esm',
 });
+await build({
+  entryPoints: [join(root, 'extension/background.mjs')],
+  outfile: join(root, 'extension/background.js'),
+  bundle: true, platform: 'browser', format: 'esm', target: 'chrome101',
+});
 await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
 await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
 console.log('Built standalone Skill and Chrome extension in dist/.');

@@ -22,7 +22,7 @@ npm run build
 - `dist/extension/`：在 `chrome://extensions` 开启开发者模式后，通过“加载已解压的扩展程序”选择此目录。
 - `npm run worker:build`：单独构建 Worker 到 `dist/worker/`；这是本地打包，不会部署。
 
-本地开发也可加载仓库的 `extension/` 目录。先运行 `npm run build`，它会从共享核心生成该目录所需的 `app.js`；源码更新后再次构建，并在 `chrome://extensions` 重新加载扩展。直接加载尚未构建的源码目录会导致解析按钮无法工作。
+本地开发也可加载仓库的 `extension/` 目录。先运行 `npm run build`，它会从共享核心生成 `app.js` 和 `background.js`；源码更新后再次构建，并在 `chrome://extensions` 重新加载扩展。直接加载尚未构建的源码目录会导致解析按钮无法工作。
 
 Skill 包放到宿主的技能目录。例如 Codex 的 `~/.codex/skills/weixin-channels-video/`；已存在同名 Skill 时先检查内容，避免覆盖。Chrome 扩展点击工具栏图标后在独立标签页打开，关闭页面不会取消 Chrome 已启动的下载。
 
@@ -168,9 +168,11 @@ curl --fail-with-body http://localhost:3000/parse \
 
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 
-元宝解析和视频详情请求都无需打开上游标签页。扩展按需加载固定的隐藏元宝或视频号预览 iframe，由其中的隔离世界脚本向固定的同源 API 发送请求；收到响应、失败或超时后立即卸载 iframe。元宝请求使用当前浏览器会话，浏览器按 iframe 的 SameSite 和第三方 Cookie 策略决定携带哪些元宝 Cookie；受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。扩展不读取 Cookie，也不会回退到标签页。视频详情请求不携带视频号 Cookie；预览 iframe 使用固定页面地址，API 请求仍沿用核心生成的 `_rid`、`_pageUrl`、请求体和包含 `token`、`eid` 的 Referer。
+解析时无需打开元宝或视频号上游标签页。元宝解析仍使用隐藏 iframe 和浏览器会话；浏览器按 iframe 的 SameSite 与第三方 Cookie 策略决定是否携带元宝 Cookie。受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。
 
-扩展申请下载权限及访问两个上游站点所需的 host permissions。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；验证消息只接受扩展自己的 `index.html` 页面，并核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 101+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。当前只有本机合成响应验证，真实视频号接口是否接受这些请求头尚未验证。
+
+扩展申请下载、`declarativeNetRequestWithHostAccess` 及访问两个上游站点所需的 host permissions。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
 扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 
