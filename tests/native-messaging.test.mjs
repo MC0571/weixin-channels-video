@@ -8,10 +8,10 @@ import { EventEmitter } from "node:events";
 import { connect, createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { createAgentCommandHandler, createAgentConnectionController } from "../extension/agent.mjs";
+import { createAgentCommandHandler } from "../extension/agent.mjs";
 import { BRIDGE_ERROR_MESSAGES, BridgeFrameDecoder, encodeBridgeFrame, isSafeRelativeMp4Filename, NATIVE_HOST_NAME, validateBridgeCommand, validateBridgeResponse } from "../src/native-messaging.mjs";
 import { startNativeHost } from "../src/native-host.mjs";
-import { bridgeSocketPath, installBridge, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
+import { bridgeSocketPath, installBridge, inspectBridgeComponents, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
 import { BridgeError, requestBridge, waitForBridge } from "../skills/weixin-channels-video/scripts/bridge-client.mjs";
 import { runCli } from "../skills/weixin-channels-video/scripts/cli.mjs";
 
@@ -185,6 +185,20 @@ test("installer uses profile metadata only and writes private, exact user-level 
     assert.match(launcher, /"\$@"/);
     assert.equal((await readFile(join(chromeRoot, "Local State"), "utf8")).includes("Cookies"), false);
 
+    assert.deepEqual(await inspectBridgeComponents(installed.config, { registryDir }), {
+      registration: "valid",
+      host: "present",
+      launcher: "invalid",
+      node: "missing",
+      session: "available",
+    });
+
+    const sessionPath = join(appSupportDir, "session.json");
+    await writeFile(sessionPath, JSON.stringify({ version: 1, sessionId, unexpected: true }));
+    assert.equal((await inspectBridgeComponents(installed.config, { registryDir })).session, "invalid");
+    assert.equal(await readBridgeSession(installed.config), null);
+    await writeFile(sessionPath, JSON.stringify({ version: 1, sessionId }));
+
     const updated = await installBridge({
       extensionId: EXTENSION_ID,
       profile: "Profile 3",
@@ -300,6 +314,8 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   const errors = [];
   let launched;
   let waited;
+  const launches = [];
+  const waitTimeouts = [];
   assert.equal(await runCli(["status"], {
     stdout: (value) => outputs.push(value),
     readInstallation: async () => null,
@@ -333,13 +349,22 @@ test("CLI connection sessions stay private and status distinguishes disconnected
     stdout: (value) => outputs.push(value),
     readInstallation: async () => config,
     readSession: async () => SESSION_1,
-    launch: async (bridgeConfig, pairedSession) => { launched = bridgeConfig; assert.equal(pairedSession, SESSION_1); },
-    bridgeWait: async (_config, sessionId) => {
-      if (!waited) { waited = sessionId; throw new BridgeError("BRIDGE_TIMEOUT", "ignored"); }
+    launch: async (bridgeConfig, pairedSession) => {
+      launched ??= bridgeConfig;
+      assert.equal(bridgeConfig, config);
+      if (launches.length === 0) assert.equal(pairedSession, undefined);
+      else assert.equal(pairedSession, SESSION_1);
+      launches.push(pairedSession);
+    },
+    bridgeWait: async (_config, sessionId, options) => {
+      waitTimeouts.push(options.timeoutMs);
+      if (waitTimeouts.length < 3) { waited ??= sessionId; throw new BridgeError("BRIDGE_TIMEOUT", "ignored"); }
     },
   }), 0);
   assert.equal(launched, config);
   assert.equal(waited, SESSION_1);
+  assert.deepEqual(launches, [undefined, SESSION_1]);
+  assert.deepEqual(waitTimeouts, [500, 5_000, 30_000]);
   assert.equal(outputs.pop(), "Connected to the Chrome extension.");
   assert.equal(errors.length, 0);
   assert.equal(outputs.some((value) => value.includes(SESSION_1)), false);
@@ -356,6 +381,7 @@ test("CLI parse passes only the fixed command shape and never logs the share URL
     stderr: (value) => errors.push(value),
     readInstallation: async () => ({ appSupportDir: "/tmp/bridge" }),
     readSession: async () => SESSION_1,
+    bridgeWait: async () => {},
     bridgeRequest: async (_config, _session, request, options) => {
       sent = { request, options };
       return result;
@@ -374,6 +400,33 @@ test("CLI parse passes only the fixed command shape and never logs the share URL
     readInstallation: async () => { throw new Error("must not read configuration"); },
   }), 2);
   assert.match(errors.pop(), /safe relative/);
+});
+
+test("CLI auto-connects before a download and never retries a task after timeout", async () => {
+  const config = { extensionId: EXTENSION_ID, profileDirectory: "Profile 3", chromeUserDataDir: "/tmp/chrome", appSupportDir: "/tmp/bridge" };
+  const errors = [];
+  const launches = [];
+  let bridgeWaitCount = 0;
+  let taskRequestCount = 0;
+  const exitCode = await runCli(["download", "--url", "https://weixin.qq.com/sph/synthetic"], {
+    stderr: (value) => errors.push(value),
+    readInstallation: async () => config,
+    readSession: async () => SESSION_1,
+    launch: async (_config, bootstrapSession) => launches.push(bootstrapSession),
+    bridgeWait: async () => {
+      bridgeWaitCount += 1;
+      if (bridgeWaitCount === 1) throw new BridgeError("BRIDGE_TIMEOUT", "ignored");
+    },
+    bridgeRequest: async () => {
+      taskRequestCount += 1;
+      throw new BridgeError("BRIDGE_TIMEOUT", "ignored");
+    },
+  });
+  assert.equal(exitCode, 1);
+  assert.deepEqual(launches, [undefined]);
+  assert.equal(bridgeWaitCount, 2);
+  assert.equal(taskRequestCount, 1);
+  assert.deepEqual(errors, [`BRIDGE_TIMEOUT: ${BRIDGE_ERROR_MESSAGES.BRIDGE_TIMEOUT}`]);
 });
 
 test("agent returns only selected video fields and waits for Chrome's real download outcome", async () => {
@@ -417,8 +470,19 @@ test("agent returns only selected video fields and waits for Chrome's real downl
   assert.deepEqual(downloadResponse, {
     id: REQUEST_ID,
     ok: true,
-    result: { state: "complete", path: "/Users/test/Downloads/clip.mp4", bytes: 321 },
+    result: {
+      title: "A title",
+      author: "An author",
+      coverUrl: "https://media.example/cover.jpg?sig=x",
+      previewUrl: "https://media.example/video.mp4?sig=x",
+      downloadUrl: "https://media.example/video.mp4?sig=x",
+      mediaVariants: [{ label: "H.264", downloadUrl: "https://media.example/video.mp4?sig=x" }],
+      state: "complete",
+      path: "/Users/test/Downloads/clip.mp4",
+      bytes: 321,
+    },
   });
+  assert.equal(JSON.stringify(downloadResponse).includes("must-not-leak"), false);
 });
 
 test("agent treats interrupted and zero-byte Chrome downloads as failures", async () => {

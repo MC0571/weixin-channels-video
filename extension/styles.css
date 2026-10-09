@@ -342,44 +342,6 @@ video[hidden] {
   text-align: right;
 }
 
-.agent-connect-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-.agent-connect-copy {
-  max-width: 620px;
-}
-
-.agent-connect-copy h2 {
-  margin-bottom: 8px;
-}
-
-.agent-connect-copy p:not(.eyebrow):not(.status) {
-  margin-bottom: 0;
-  color: var(--ink-muted);
-  font-size: 14px;
-}
-
-.agent-connect-card .status {
-  margin-bottom: 0;
-}
-
-.agent-connect-toggle {
-  flex: 0 0 auto;
-  border: 1px solid #cfdad3;
-  background: #f6f8f6;
-  color: #34433c;
-}
-
-.agent-connect-toggle[aria-checked="true"] {
-  border-color: var(--green);
-  background: var(--green);
-  color: #fff;
-}
-
 footer {
   padding: 4px 4px 0;
   font-size: 12px;
@@ -409,11 +371,6 @@ footer a {
 
   .form-row .primary-button {
     width: 100%;
-  }
-
-  .agent-connect-card {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .result-grid {

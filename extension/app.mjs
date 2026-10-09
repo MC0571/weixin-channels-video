@@ -11,6 +11,7 @@ const YUANBAO_HOME_URL = `${YUANBAO_ORIGIN}/`;
 const API_REQUEST_TYPE = "weixin-channels-video:api-request";
 const API_RESPONSE_TYPE = "weixin-channels-video:api-response";
 const FEED_REQUEST_TYPE = "weixin-channels-video:feed-request";
+export const PAGE_DOWNLOAD_TYPE = "weixin-channels-video:page-download";
 const IFRAME_TIMEOUT_MS = 15_000;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -23,7 +24,7 @@ function responseFromRequestResult(result) {
   });
 }
 
-function requestParseShareInHiddenIframe(
+export function requestParseShareInHiddenIframe(
   body,
   documentApi = globalThis.document,
   windowApi = globalThis.window,
@@ -423,7 +424,12 @@ function initializePage() {
     downloadButton.disabled = true;
     downloadStatusElement.textContent = "正在开始下载…";
     try {
-      await startDownload({ ...result, downloadUrl }, chrome);
+      const response = await chrome.runtime.sendMessage({
+        type: PAGE_DOWNLOAD_TYPE,
+        filename: safeFilename(result.title),
+        downloadUrl,
+      });
+      if (!response?.ok) throw new Error("DOWNLOAD_START_FAILED");
       await refreshDownloadStatus();
     } catch {
       downloadStatusElement.textContent = "下载无法启动，请检查浏览器下载设置。";

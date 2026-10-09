@@ -30,13 +30,18 @@ await build({
   outfile: join(root, 'extension/agent.js'),
   bundle: true, platform: 'browser', format: 'esm', target: 'chrome116',
 });
+await build({
+  entryPoints: [join(root, 'extension/offscreen.mjs')],
+  outfile: join(root, 'extension/offscreen.js'),
+  bundle: true, platform: 'browser', format: 'esm', target: 'chrome116',
+});
 await rm(join(root, 'extension/app.js'), { force: true });
 await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
 await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
 await mkdir(join(dist, 'weixin-channels-video/assets'), { recursive: true });
 const packagedExtension = join(dist, 'weixin-channels-video/assets/extension');
 await mkdir(packagedExtension, { recursive: true });
-for (const file of ['manifest.json', 'index.html', 'styles.css', 'background.js', 'agent.js', 'yuanbao-frame.js']) {
+for (const file of ['manifest.json', 'index.html', 'styles.css', 'background.js', 'agent.js', 'offscreen.html', 'offscreen.js', 'yuanbao-frame.js']) {
   await cp(join(root, 'extension', file), join(packagedExtension, file));
 }
 await cp(join(root, 'LICENSE'), join(packagedExtension, 'LICENSE'));
