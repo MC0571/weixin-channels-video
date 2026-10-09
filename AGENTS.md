@@ -19,14 +19,14 @@
 
 - 元宝解析、`playable_url` 参数提取、视频详情解析、媒体选择和错误语义只在共享 JavaScript / TypeScript 核心中维护；Skill、自部署 API、Chrome 扩展不得复制各自的业务实现。
 - 核心通过运行环境的请求适配调用接口，不直接依赖 Node.js 文件系统、钥匙串、`chrome.*` 或 Cloudflare 环境绑定。这些能力由对应入口提供。
-- Skill 的宿主检测、执行方式选择与 Cookie 获取属于入口层；两种执行方式都使用共享核心。按 README 的优先级按需检查，不为检测另一种方式额外触发 Cookie 读取或钥匙串授权；用户指定方式时遵从指定。
-- Skill 随包携带可在本地使用的解析代码；Chrome 扩展独立解析。不得将它们的正常工作路径改为依赖 Docker、远程解析服务或 Codex Chrome 插件。
+- Skill 通过本地 CLI 和 Native Messaging 桥接调用本项目 Chrome 扩展；解析与浏览器登录态使用由扩展负责。桥接只传递固定任务和结果，不复制解析规则，不提供任意请求或脚本执行入口。
+- Skill 随包携带扩展和桥接程序，正常工作不依赖源码仓库、Docker、远程解析服务或 Codex Chrome 插件。首次安装与权限变更按用户授权执行；已安装时直接复用，不重复安装或确认。
 - Worker 与 Docker 提供同一解析 API 契约，媒体落盘交给 Skill、扩展或 API 调用者。服务使用部署者注入的元宝凭据，不假定它能自动继承本机 Chrome 登录态。
 
 ## 登录态与凭据处理
 
 - Chrome 已安装、profile 存在、Cookie 非空或进入元宝聊天页，都不能证明登录有效。使用 `/api/getuserinfo` 的服务端结果检查账号，区分非匿名登录、明确认证失败和检查失败；网络错误、空响应或格式异常不得直接判为未登录。
-- 内置浏览器请求使用其自身会话携带 Cookie；本地脚本只读取所选 profile 中适用于元宝请求的 Cookie。按请求 URL 匹配父域、host-only、路径、Secure 和有效期，不只按 `.tencent.com` 拼接 Cookie。
+- Skill 和扩展通过浏览器自身会话发请求，不把 Cookie 交给桥接程序。维护服务端 Cookie 适配或已有本地 Cookie helper 时，按请求 URL 匹配父域、host-only、路径、Secure 和有效期，不只按 `.tencent.com` 拼接 Cookie。
 - 本地 Cookie 读取不得写入或覆盖 Chrome profile。Chrome 无头启动是否成功与是否复用有效登录态分别验证，不以关闭 Chrome 视为解除默认数据目录的远程调试限制。
 - Cookie、钥匙串中的解密凭据、`generalToken` 和 API 访问凭据不进入 AI 对话、日志、测试夹具或版本库。诊断输出只保留状态、错误类别及必要字段是否存在；完整响应和带认证参数的 URL 不直接打印。
 - 元宝 Cookie 与服务对外 API 访问凭据分别管理；错误结果应区分服务调用者认证失败和元宝登录失效。

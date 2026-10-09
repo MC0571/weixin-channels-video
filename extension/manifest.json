@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "在本地解析视频号分享链接并下载视频。",
   "minimum_chrome_version": "116",
-  "permissions": ["downloads", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["downloads", "declarativeNetRequestWithHostAccess", "nativeMessaging"],
   "host_permissions": [
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*"
