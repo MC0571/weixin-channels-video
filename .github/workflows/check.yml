@@ -18,3 +18,4 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run worker:build
+      - run: python3 -m unittest discover -s skills/weixin-channels-video/scripts -p 'test_*.py'
