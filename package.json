@@ -1,0 +1,13 @@
+{
+  "name": "weixin-channels-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": "./src/core.mjs",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  }
+}
