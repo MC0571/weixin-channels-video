@@ -5,14 +5,28 @@ description: 通过本机 Chrome 插件解析视频号分享链接并下载视�
 
 # 视频号解析与下载
 
-使用包内 `scripts/cli.mjs` 调用本项目 Chrome 插件。插件复用用户自己的元宝登录态，执行共享解析核心并下载视频；Skill 不操作上游页面、不读取 Cookie 或钥匙串，不依赖 Docker、远程解析服务或 Codex Chrome 插件。
+使用包内 `scripts/run.mjs` 调用本项目 Chrome 插件。插件复用用户自己的元宝登录态，执行共享解析核心并下载视频；Skill 不操作上游页面、不读取 Cookie 或钥匙串，不依赖 Docker、远程解析服务或 Codex Chrome 插件。
+
+## 首次使用与 Skill 更新
+
+通过仓库源码安装，或使用 `npx skills update` 更新后，先运行：
+
+```sh
+node <skill-root>/scripts/run.mjs prepare
+```
+
+源码 Skill 首次准备时从本项目最新稳定 GitHub Release 下载已构建资源，校验 `SHA256SUMS` 和 runner/runtime 协议，并将资源缓存到本机工具专属目录。第一次直接调用其他 CLI 命令时，如果缓存不存在，也会自动准备并继续执行。显式 `prepare` 会检查最新稳定 Release；普通 CLI 命令只复用兼容缓存，不联网。Release 安装包已包含运行资源，`prepare` 可离线复用。
+
+`prepare` 成功后输出 JSON，其中 `version`、`runtimeCLI` 和 `extensionAssets` 分别是资源版本、实际 CLI 路径和扩展目录。协议不兼容、资源缺失、下载失败或校验失败时停止并报告错误；升级失败不会切换当前缓存。准备资源不会改动 Chrome、桥接注册或配对。
+
+Skill 更新后执行 `prepare`，再运行 `status` 检查当前桥接与扩展是否完成 Native Messaging 握手。兼容性分两层：runner 与打包运行资源使用 `runtimeProtocol` 检查，桥接与扩展使用既有 `hello` / `ready` 协议检查；相同协议号不表示扩展清单版本必须完全相等。若诊断显示需要刷新桥接，复用当前扩展 ID 和 Chrome profile 重新运行 `install-bridge`，再执行 `connect`、`status`。相同扩展 ID、profile 和 Chrome 用户数据目录下，桥接安装会保留现有配对；身份变化时需要重新配对。
 
 ## 检测与恢复连接
 
-需要 macOS、Node.js 24+ 和本机 Chrome 116+。先执行：
+需要 macOS、Node.js 24+ 和本机 Chrome 116+。源码安装或 Skill 更新后按上节执行 `prepare`，然后检查状态：
 
 ```sh
-node <skill-root>/scripts/cli.mjs status
+node <skill-root>/scripts/run.mjs status
 ```
 
 结果分开报告配置、连接和登录状态。只有插件已连接时才检查实际元宝登录；未连接不代表未登录，检查失败不代表登录失效。已连接时直接使用，不打开插件页。
@@ -20,7 +34,7 @@ node <skill-root>/scripts/cli.mjs status
 未连接、配置无效或通信失败时，先执行只读诊断：
 
 ```sh
-node <skill-root>/scripts/cli.mjs diagnose
+node <skill-root>/scripts/run.mjs diagnose
 ```
 
 根据诊断中的 Chrome 安装、版本与运行状态、profile、扩展记录、桥接注册与文件、配对及连接状态选择下一步。只报告与当前故障有关的已确认事实和应对方式，不把完整 JSON 当作用户指引。`unknown` 表示无法确认；`recorded_unknown` 表示存在扩展记录但无法确认是否启用；扩展记录缺失也可能是 ID 不匹配。不能仅凭连接超时断言扩展未安装。
@@ -38,22 +52,22 @@ node <skill-root>/scripts/cli.mjs diagnose
 
 Chrome 缺失且需要手动安装时，按 [Google 官方安装指引](https://support.google.com/chrome/answer/95346) 下载 Mac 安装包，打开磁盘映像，将 Google Chrome 拖入 Applications，再启动完成首次设置；随后重新诊断。已有 Chrome 的启动问题应按实际错误排查，避免重复安装。
 
-确认缺少安装时，先准备包内 `assets/extension/` 的实际绝对目录和具体操作步骤，再取得安装与权限授权。说明插件可访问元宝和视频号站点、管理本项目的下载、为固定视频详情请求设置请求头，并通过 `nativeMessaging` 与本地桥接通信；`storage` 保存此 profile 的配对，`offscreen` 承接隐藏 iframe 与旧配对迁移，`alarms` 用于后台重连。首次配置后自动连接，无页面开关。桥接注册在当前用户的 Chrome NativeMessagingHosts，配置与 socket 仅当前用户可访问；Cookie 不交给桥接或 Agent。
+确认缺少安装时，先运行 `node <skill-root>/scripts/run.mjs prepare`，并使用结果中 `extensionAssets` 给出的实际绝对目录准备操作步骤，再取得安装与权限授权。说明插件可访问元宝和视频号站点、管理本项目的下载、为固定视频详情请求设置请求头，并通过 `nativeMessaging` 与本地桥接通信；`storage` 保存此 profile 的配对，`offscreen` 承接隐藏 iframe 与旧配对迁移，`alarms` 用于后台重连。首次配置后自动连接，无页面开关。桥接注册在当前用户的 Chrome NativeMessagingHosts，配置与 socket 仅当前用户可访问；Cookie 不交给桥接或 Agent。
 
-授权可来自本次或仍有效的既有委托，对象与权限范围相同时不重复请求。授权后，有桌面操作工具就帮助在选定 profile 的 `chrome://extensions` 中启用开发者模式并加载包内扩展；没有该能力就提供目录和最短步骤。复用已经安装的本项目扩展时核对来源与权限，不重复安装。
+授权可来自本次或仍有效的既有委托，对象与权限范围相同时不重复请求。授权后，有桌面操作工具就帮助在选定 profile 的 `chrome://extensions` 中启用开发者模式并加载 `extensionAssets` 指向的扩展目录；没有该能力就提供此绝对路径和最短步骤。复用已经安装的本项目扩展时核对来源与权限，不重复安装。
 
 列出 profile 只读取 Chrome 元数据：
 
 ```sh
-node <skill-root>/scripts/cli.mjs list-profiles
+node <skill-root>/scripts/run.mjs list-profiles
 ```
 
 使用用户已选定的 profile；有多个且用户未指定时请用户选择，不逐个尝试登录。取得扩展详情中的 ID 后执行：
 
 ```sh
-node <skill-root>/scripts/cli.mjs install-bridge --extension-id <extension-id> --profile <directory-or-name>
-node <skill-root>/scripts/cli.mjs connect
-node <skill-root>/scripts/cli.mjs status
+node <skill-root>/scripts/run.mjs install-bridge --extension-id <extension-id> --profile <directory-or-name>
+node <skill-root>/scripts/run.mjs connect
+node <skill-root>/scripts/run.mjs status
 ```
 
 后台持有连接和任务，Chrome 启动或扩展重载后恢复此 profile 的配对；关闭、刷新或不打开插件页面均可使用 Skill。`connect` 复用已有连接，必要时启动 Chrome 或完成首次/修复配对；进程启动和配对保存后仍需等待桥接握手成功。已配置但未连接时直接连接，无需再次安装。旧页面 localStorage 配对自动迁移，配对不在 profile 之间共享。桥接程序升级或安装时使用的 Node.js 可执行文件位置变化后重新注册桥接。
@@ -61,7 +75,7 @@ node <skill-root>/scripts/cli.mjs status
 安装失败或没有桌面代操作能力时，报告失败步骤与错误类别，并提供完整的手动指引：
 
 1. 在选定 Chrome profile 打开 `chrome://extensions`，开启“开发者模式”。
-2. 点击“加载已解压的扩展程序”，选择上面给出的实际 `<skill-root>/assets/extension/` 绝对目录，确认扩展已启用。已有安装只核对来源、ID 与状态，避免重复加载。
+2. 点击“加载已解压的扩展程序”，选择 `prepare` 结果中 `extensionAssets` 给出的实际绝对目录，确认扩展已启用。已有安装只核对来源、ID 与状态，避免重复加载。
 3. 打开扩展详情，复制扩展 ID；运行上述 `install-bridge` 命令，填入该 ID 和选定 profile 的目录名。
 4. 运行 `connect` 和 `status`。连接失败时运行 `diagnose`，按具体原因检查；元宝未登录时在同一 profile 登录再检查。
 
@@ -72,8 +86,8 @@ node <skill-root>/scripts/cli.mjs status
 ## 解析与下载
 
 ```sh
-node <skill-root>/scripts/cli.mjs parse --url <share-link>
-node <skill-root>/scripts/cli.mjs download --url <share-link> [--filename <relative-mp4-filename>]
+node <skill-root>/scripts/run.mjs parse --url <share-link>
+node <skill-root>/scripts/run.mjs download --url <share-link> [--filename <relative-mp4-filename>]
 ```
 
 分享链接格式为 `https://weixin.qq.com/sph/...`。下载采用共享核心的默认媒体版本，默认文件名为 `<title>.mp4`：扩展清理标题中的文件名非法字符并限制长度，重名时自动改名。用户没有指定名称时省略 `--filename`，不要另取通用文件名。文件名相对于 Chrome 下载目录，位置选择遵循 Chrome 下载设置。不要把用户的绝对保存路径直接传给 `--filename`；需要另存时，在下载完成后用宿主文件工具移动，并保留已有文件。

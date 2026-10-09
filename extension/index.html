@@ -10,15 +10,58 @@
   <body>
     <main class="shell">
       <header class="page-header">
-        <p class="eyebrow">WEIXIN CHANNELS</p>
-        <h1>解析视频号分享链接</h1>
-        <p class="intro">粘贴公开分享链接，预览视频并保存到下载目录。</p>
+        <div class="page-title-row">
+          <h1>解析视频号分享链接</h1>
+          <button
+            id="ai-download-prompt-open"
+            class="secondary-button ai-prompt-launch"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="ai-download-prompt-popover"
+            aria-expanded="false"
+            popovertarget="ai-download-prompt-popover"
+          >
+            <img src="./icons/terminal.svg" alt="" aria-hidden="true">
+            <span>Agent 设置</span>
+          </button>
+        </div>
+        <p class="intro">粘贴公开分享链接，解析后预览并保存视频。</p>
       </header>
 
-      <section class="card input-card" aria-labelledby="input-heading">
-        <h2 id="input-heading">分享链接</h2>
+      <div
+        id="ai-download-prompt-popover"
+        class="ai-prompt-popover"
+        popover="auto"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="ai-prompt-heading"
+        aria-describedby="ai-prompt-description"
+      >
+        <div class="ai-prompt-heading-row">
+          <h2 id="ai-prompt-heading">Agent 设置</h2>
+          <div class="ai-agent-icons" role="group" aria-label="Agent 图标">
+            <img src="./icons/agents/codex.png" alt="Codex" title="Codex" width="24" height="24">
+            <img src="./icons/agents/claude-code.png" alt="Claude Code" title="Claude Code" width="24" height="24">
+            <img src="./icons/agents/workbuddy.svg" alt="WorkBuddy" title="WorkBuddy" width="24" height="24">
+            <img src="./icons/agents/doubao-work.png" alt="豆包工作" title="豆包工作" width="24" height="24">
+            <img src="./icons/agents/qwen-work.png" alt="千问办公（QwenWork）" title="千问办公（QwenWork）" width="24" height="24">
+            <img src="./icons/agents/trae.png" alt="Trae" title="Trae" width="24" height="24">
+          </div>
+        </div>
+        <p id="ai-prompt-description" class="visually-hidden">
+          检查完整提示词后，可复制并粘贴给 Agent；此面板不会自动执行下载。
+        </p>
+        <textarea id="ai-download-prompt-text" rows="12" readonly aria-label="提示词全文"></textarea>
+        <p id="ai-prompt-copy-status" class="status ai-prompt-copy-status" role="status" aria-live="polite"></p>
+        <button id="ai-download-prompt-copy" class="ai-prompt-copy" type="button">
+          <img src="./icons/copy.svg" alt="" aria-hidden="true">
+          <span>复制提示词</span>
+        </button>
+      </div>
+
+      <section class="card input-card" aria-label="解析视频号分享链接">
         <form id="parse-form">
-          <label for="share-url">视频号链接</label>
+          <label class="visually-hidden" for="share-url">视频号分享链接</label>
           <div class="form-row">
             <input
               id="share-url"
@@ -26,6 +69,9 @@
               type="url"
               inputmode="url"
               autocomplete="url"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
               placeholder="https://weixin.qq.com/sph/..."
               required
             >
@@ -33,14 +79,21 @@
           </div>
         </form>
         <p id="parse-status" class="status" role="status" aria-live="polite"></p>
+        <div class="input-notes">
+          <p class="privacy-note">
+            点击解析后，链接会发送至腾讯元宝并向视频号获取视频信息；浏览器使用当前元宝登录态。
+            <a href="https://github.com/MC0571/weixin-channels-video/blob/main/PRIVACY.md" target="_blank" rel="noreferrer">隐私政策</a>
+          </p>
+          <p class="login-note">
+            需要在此 Chrome profile 中登录腾讯元宝，登录信息保留在浏览器内。
+            <a href="https://yuanbao.tencent.com/" target="_blank" rel="noreferrer">打开元宝登录</a>
+          </p>
+        </div>
       </section>
 
       <section id="result-card" class="card result-card" aria-labelledby="result-heading" hidden>
         <div class="result-heading">
-          <div>
-            <p class="eyebrow">PARSE RESULT</p>
-            <h2 id="result-heading">视频信息</h2>
-          </div>
+          <h2 id="result-heading">视频信息</h2>
           <button id="download-button" class="primary-button" type="button" disabled>下载视频</button>
         </div>
         <div class="result-grid">
@@ -68,17 +121,9 @@
       </section>
 
       <section class="card download-card" aria-labelledby="download-heading">
-        <div>
-          <p class="eyebrow">DOWNLOADS</p>
-          <h2 id="download-heading">下载状态</h2>
-        </div>
-        <p id="download-status" class="status" role="status" aria-live="polite">正在读取下载状态…</p>
+        <h2 id="download-heading">下载状态</h2>
+        <p id="download-status" class="status" role="status" aria-live="polite">下载进度会显示在这里。</p>
       </section>
-
-      <footer>
-        需要在此 Chrome profile 中登录腾讯元宝。登录信息保留在浏览器内。
-        <a href="https://yuanbao.tencent.com/" target="_blank" rel="noreferrer">打开元宝登录</a>
-      </footer>
     </main>
   </body>
 </html>
