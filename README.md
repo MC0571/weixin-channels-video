@@ -22,6 +22,8 @@ npm run build
 - `dist/extension/`：在 `chrome://extensions` 开启开发者模式后，通过“加载已解压的扩展程序”选择此目录。
 - `npm run worker:build`：单独构建 Worker 到 `dist/worker/`；这是本地打包，不会部署。
 
+本地开发也可加载仓库的 `extension/` 目录。先运行 `npm run build`，它会从共享核心生成该目录所需的 `app.js`；源码更新后再次构建，并在 `chrome://extensions` 重新加载扩展。直接加载尚未构建的源码目录会导致解析按钮无法工作。
+
 Skill 包放到宿主的技能目录。例如 Codex 的 `~/.codex/skills/weixin-channels-video/`；已存在同名 Skill 时先检查内容，避免覆盖。Chrome 扩展点击工具栏图标后在独立标签页打开，关闭页面不会取消 Chrome 已启动的下载。
 
 ## 三种使用入口

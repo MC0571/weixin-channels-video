@@ -23,11 +23,11 @@ await build({
   outfile: join(dist, 'weixin-channels-video/scripts/browser.mjs'),
   bundle: true, platform: 'neutral', format: 'esm',
 });
-await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
-await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
 await build({
   entryPoints: [join(root, 'extension/app.mjs')],
-  outfile: join(dist, 'extension/app.js'),
+  outfile: join(root, 'extension/app.js'),
   bundle: true, platform: 'browser', format: 'esm',
 });
+await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
+await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
 console.log('Built standalone Skill and Chrome extension in dist/.');
