@@ -1,6 +1,6 @@
 import { API_URLS, ParseError } from "../src/core.mjs";
 import { NATIVE_HOST_NAME, SESSION_ID_PATTERN, validateBridgeCommand } from "../src/native-messaging.mjs";
-import { createExtensionRequest, startDownload, waitForDownload } from "./app.mjs";
+import { createExtensionRequest, PAGE_DOWNLOAD_TYPE, safeFilename, startDownload, waitForDownload } from "./app.mjs";
 import { createAgentCommandHandler } from "./agent.mjs";
 
 const CHANNELS_ORIGIN = "https://channels.weixin.qq.com";
@@ -26,6 +26,30 @@ const initialRuleCleanup = chrome.declarativeNetRequest.updateSessionRules({
   removeRuleIds: [FEED_RULE_ID],
 }).catch(() => undefined);
 let feedRequestQueue = Promise.resolve();
+const requestedFilenames = new Map();
+
+async function startTrackedDownload(result, chromeApi = chrome, filename = safeFilename(result.title)) {
+  const downloadId = await startDownload(result, chromeApi, filename);
+  requestedFilenames.set(downloadId, filename);
+  return downloadId;
+}
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  const filename = item.byExtensionId === chrome.runtime.id ? requestedFilenames.get(item.id) : undefined;
+  if (!filename) {
+    suggest();
+    return;
+  }
+
+  requestedFilenames.delete(item.id);
+  suggest({ filename, conflictAction: "uniquify" });
+});
+
+chrome.downloads.onChanged.addListener((delta) => {
+  if (delta.state?.current === "complete" || delta.state?.current === "interrupted") {
+    requestedFilenames.delete(delta.id);
+  }
+});
 
 function hasExactKeys(value, keys) {
   return value &&
@@ -172,6 +196,22 @@ function queueFeedRequest(request) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === PAGE_DOWNLOAD_TYPE) {
+    if (
+      sender?.id !== chrome.runtime.id ||
+      sender.frameId !== 0 ||
+      sender.url !== chrome.runtime.getURL("index.html") ||
+      !hasExactKeys(message, ["type", "filename", "downloadUrl"]) ||
+      typeof message.filename !== "string" ||
+      typeof message.downloadUrl !== "string"
+    ) return;
+    void startTrackedDownload({ downloadUrl: message.downloadUrl }, chrome, message.filename).then(
+      () => sendResponse({ ok: true }),
+      () => sendResponse({ ok: false }),
+    );
+    return true;
+  }
+
   if (message?.type === PAIRING_MESSAGE_TYPE) {
     if (
       sender?.id !== chrome.runtime.id ||
@@ -335,7 +375,7 @@ function workerRequestFactory() {
 const handleAgentCommand = createAgentCommandHandler({
   chromeApi: chrome,
   requestFactory: workerRequestFactory,
-  downloadStarter: startDownload,
+  downloadStarter: startTrackedDownload,
   downloadWaiter: waitForDownload,
 });
 

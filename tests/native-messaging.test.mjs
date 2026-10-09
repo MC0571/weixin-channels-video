@@ -470,8 +470,19 @@ test("agent returns only selected video fields and waits for Chrome's real downl
   assert.deepEqual(downloadResponse, {
     id: REQUEST_ID,
     ok: true,
-    result: { state: "complete", path: "/Users/test/Downloads/clip.mp4", bytes: 321 },
+    result: {
+      title: "A title",
+      author: "An author",
+      coverUrl: "https://media.example/cover.jpg?sig=x",
+      previewUrl: "https://media.example/video.mp4?sig=x",
+      downloadUrl: "https://media.example/video.mp4?sig=x",
+      mediaVariants: [{ label: "H.264", downloadUrl: "https://media.example/video.mp4?sig=x" }],
+      state: "complete",
+      path: "/Users/test/Downloads/clip.mp4",
+      bytes: 321,
+    },
   });
+  assert.equal(JSON.stringify(downloadResponse).includes("must-not-leak"), false);
 });
 
 test("agent treats interrupted and zero-byte Chrome downloads as failures", async () => {

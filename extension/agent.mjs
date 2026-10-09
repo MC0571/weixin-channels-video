@@ -79,6 +79,7 @@ export function createAgentCommandHandler({
         id: request.id,
         ok: true,
         result: {
+          ...projectVideoResult(video),
           state: download.state,
           path: download.path,
           bytes: download.bytes,

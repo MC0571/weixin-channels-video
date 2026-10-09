@@ -130,11 +130,17 @@ async function withBackgroundHarness({ fetchImpl, timerApi, initialStorage = {},
   const onStartup = event();
   const onInstalled = event();
   const onAlarm = event();
+  const onDownloadDeterminingFilename = event();
+  const onDownloadChanged = event();
   const storage = new Map(Object.entries(initialStorage));
   const alarms = new Map(Object.entries(initialAlarms));
   const ports = [];
   let offscreenCreated = false;
   const chromeApi = {
+    downloads: {
+      onDeterminingFilename: onDownloadDeterminingFilename,
+      onChanged: onDownloadChanged,
+    },
     runtime: {
       id: extensionId,
       getURL: (path) => `chrome-extension://${extensionId}/${path}`,
@@ -732,6 +738,10 @@ test("toolbar action focuses the existing page or creates one", async () => {
   let queried = [{ tabId: 42, windowId: 9 }];
   const focusedWindows = [];
   globalThis.chrome = {
+    downloads: {
+      onDeterminingFilename: { addListener() {} },
+      onChanged: { addListener() {} },
+    },
     action: { onClicked: { addListener: (listener) => { onClicked = listener; } } },
     runtime: {
       getURL: (path) => `chrome-extension://synthetic-id/${path}`,
