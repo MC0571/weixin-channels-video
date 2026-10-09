@@ -168,9 +168,9 @@ curl --fail-with-body http://localhost:3000/parse \
 
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 
-解析时无需打开元宝标签页。扩展按需加载隐藏的元宝 iframe，并由其中的隔离世界脚本向固定的元宝同源接口发送解析请求；收到响应或请求失败后立即卸载 iframe。浏览器按 iframe 的 SameSite 和第三方 Cookie 策略决定携带哪些元宝 Cookie；受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。扩展不读取 Cookie，也不会回退到元宝标签页。获取视频详情时，扩展仍会在后台临时打开固定的视频号预览页以发送同源请求，并在完成后关闭本次创建的标签页；视频详情 API 请求不携带视频号 Cookie，页面导航按 Chrome 自身会话规则执行。
+元宝解析和视频详情请求都无需打开上游标签页。扩展按需加载固定的隐藏元宝或视频号预览 iframe，由其中的隔离世界脚本向固定的同源 API 发送请求；收到响应、失败或超时后立即卸载 iframe。元宝请求使用当前浏览器会话，浏览器按 iframe 的 SameSite 和第三方 Cookie 策略决定携带哪些元宝 Cookie；受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。扩展不读取 Cookie，也不会回退到标签页。视频详情请求不携带视频号 Cookie；预览 iframe 使用固定页面地址，API 请求仍沿用核心生成的 `_rid`、`_pageUrl`、请求体和包含 `token`、`eid` 的 Referer。
 
-扩展仅申请下载、页面注入及两个上游站点所需的权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+扩展申请下载权限及访问两个上游站点所需的 host permissions。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
 扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 

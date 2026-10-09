@@ -7,15 +7,13 @@ const ENDPOINTS = new Map([
 ]);
 const CHANNELS_ORIGIN = "https://channels.weixin.qq.com";
 const CHANNELS_FEED_PAGE_PATH = "/finder-preview/pages/feed";
-const CHANNELS_FEED_API_PATH = "/finder-preview/api/feed/get_feed_info";
 const CHANNELS_FEED_PAGE_URL = `${CHANNELS_ORIGIN}${CHANNELS_FEED_PAGE_PATH}`;
 const YUANBAO_ORIGIN = "https://yuanbao.tencent.com";
 const YUANBAO_HOME_URL = `${YUANBAO_ORIGIN}/`;
-const YUANBAO_PARSE_REQUEST_TYPE = "weixin-channels-video:parse-request";
-const YUANBAO_PARSE_RESPONSE_TYPE = "weixin-channels-video:parse-response";
-const YUANBAO_IFRAME_TIMEOUT_MS = 15_000;
+const API_REQUEST_TYPE = "weixin-channels-video:api-request";
+const API_RESPONSE_TYPE = "weixin-channels-video:api-response";
+const IFRAME_TIMEOUT_MS = 15_000;
 const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const TAB_LOAD_TIMEOUT_MS = 15_000;
 
 function parseFeedPageUrl(value) {
   try {
@@ -35,61 +33,6 @@ function parseFeedPageUrl(value) {
   }
 }
 
-function waitForTabComplete(chromeApi, tabId) {
-  return new Promise((resolve, reject) => {
-    const { tabs } = chromeApi;
-    let settled = false;
-    let timeout;
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      tabs.onUpdated.removeListener(onUpdated);
-      tabs.onRemoved.removeListener(onRemoved);
-    };
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      callback(value);
-    };
-    const checkTab = async () => {
-      try {
-        const tab = await tabs.get(tabId);
-        if (tab.status === "complete") finish(resolve, tab);
-      } catch (error) {
-        finish(reject, error);
-      }
-    };
-    const onUpdated = (updatedTabId, changeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === "complete") void checkTab();
-    };
-    const onRemoved = (removedTabId) => {
-      if (removedTabId === tabId) finish(reject, new Error("Feed page tab was closed"));
-    };
-
-    tabs.onUpdated.addListener(onUpdated);
-    tabs.onRemoved.addListener(onRemoved);
-    timeout = setTimeout(
-      () => finish(reject, new Error("Feed page load timed out")),
-      TAB_LOAD_TIMEOUT_MS,
-    );
-    void checkTab();
-  });
-}
-
-async function closeCreatedTab(chromeApi, tabId) {
-  try {
-    await chromeApi.tabs.remove(tabId);
-  } catch (error) {
-    try {
-      await chromeApi.tabs.get(tabId);
-    } catch {
-      return;
-    }
-    throw error;
-  }
-}
-
 function responseFromPageResult(result) {
   if (!result || !Number.isInteger(result.status) || typeof result.body !== "string") {
     throw new TypeError("The page request returned an invalid response");
@@ -99,12 +42,22 @@ function responseFromPageResult(result) {
   });
 }
 
-function requestParseShareInHiddenIframe(
-  body,
+function requestInHiddenIframe(
+  { frameUrl, body, requestUrl, referer },
   documentApi = globalThis.document,
   windowApi = globalThis.window,
 ) {
   if (typeof body !== "string") throw new TypeError("The parse request body must be a string");
+  if ((requestUrl === undefined) !== (referer === undefined)) {
+    throw new TypeError("The feed API URL and referer must be provided together");
+  }
+  const frameOrigin = new URL(frameUrl).origin;
+  if (![YUANBAO_ORIGIN, CHANNELS_ORIGIN].includes(frameOrigin)) {
+    throw new TypeError("Only fixed upstream frames are allowed");
+  }
+  const stepName = frameOrigin === CHANNELS_ORIGIN
+    ? "视频详情隐藏页面请求"
+    : "元宝解析请求";
 
   const requestId = windowApi.crypto.randomUUID();
   if (!REQUEST_ID_PATTERN.test(requestId)) throw new TypeError("A unique request ID is unavailable");
@@ -114,7 +67,12 @@ function requestParseShareInHiddenIframe(
   iframe.title = "";
   iframe.setAttribute("aria-hidden", "true");
   iframe.tabIndex = -1;
-  iframe.src = YUANBAO_HOME_URL;
+  iframe.src = frameUrl;
+  const requestMessage = { type: API_REQUEST_TYPE, requestId, body };
+  if (requestUrl !== undefined) {
+    requestMessage.url = requestUrl;
+    requestMessage.referer = referer;
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -132,27 +90,27 @@ function requestParseShareInHiddenIframe(
       cleanup();
       callback(value);
     };
+    const fail = (kind) => finish(reject, new ParseError(
+      "UPSTREAM_ERROR",
+      `${stepName}${kind === "TIMEOUT" ? "超时" : "失败"}。`,
+    ));
     const onLoad = () => {
       try {
-        iframe.contentWindow?.postMessage({
-          type: YUANBAO_PARSE_REQUEST_TYPE,
-          requestId,
-          body,
-        }, YUANBAO_ORIGIN);
+        iframe.contentWindow?.postMessage(requestMessage, frameOrigin);
       } catch {
-        finish(reject, new Error("The Yuanbao iframe request could not be sent"));
+        fail("FAILED");
       }
     };
-    const onError = () => finish(reject, new Error("The Yuanbao iframe failed to load"));
+    const onError = () => fail("FAILED");
     const onMessage = (event) => {
-      if (event.source !== iframe.contentWindow || event.origin !== YUANBAO_ORIGIN) return;
+      if (event.source !== iframe.contentWindow || event.origin !== frameOrigin) return;
       const message = event.data;
       if (
         !message ||
         typeof message !== "object" ||
         Array.isArray(message) ||
         Object.keys(message).length !== 4 ||
-        message.type !== YUANBAO_PARSE_RESPONSE_TYPE ||
+        message.type !== API_RESPONSE_TYPE ||
         message.requestId !== requestId ||
         !Number.isInteger(message.status) ||
         (message.status !== 0 && (message.status < 200 || message.status > 599)) ||
@@ -161,13 +119,13 @@ function requestParseShareInHiddenIframe(
         return;
       }
       if (message.status === 0) {
-        finish(reject, new Error("The Yuanbao iframe request failed"));
+        fail("FAILED");
         return;
       }
       try {
         finish(resolve, responseFromPageResult(message));
       } catch {
-        finish(reject, new Error("The Yuanbao iframe returned an invalid response"));
+        fail("FAILED");
       }
     };
 
@@ -175,71 +133,20 @@ function requestParseShareInHiddenIframe(
     iframe.addEventListener("error", onError);
     windowApi.addEventListener("message", onMessage);
     timeoutId = windowApi.setTimeout(
-      () => finish(reject, new Error("The Yuanbao iframe request timed out")),
-      YUANBAO_IFRAME_TIMEOUT_MS,
+      () => fail("TIMEOUT"),
+      IFRAME_TIMEOUT_MS,
     );
-    (documentApi.body ?? documentApi.documentElement).append(iframe);
+    try {
+      (documentApi.body ?? documentApi.documentElement).append(iframe);
+    } catch {
+      fail("FAILED");
+    }
   });
-}
-
-async function requestFeedInfoInPage(chromeApi, url, init, referer) {
-  let tabId;
-  try {
-    const tab = await chromeApi.tabs.create({ url: CHANNELS_FEED_PAGE_URL, active: false });
-    tabId = tab?.id;
-    if (typeof tabId !== "number") throw new Error("Feed page tab could not be created");
-
-    const loadedTab = await waitForTabComplete(chromeApi, tabId);
-    if (!parseFeedPageUrl(loadedTab.url)) throw new Error("Feed page redirected outside its fixed path");
-
-    const [injection] = await chromeApi.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: async ({ url, body, referer }) => {
-        const origin = "https://channels.weixin.qq.com";
-        const pagePath = "/finder-preview/pages/feed";
-        const apiPath = "/finder-preview/api/feed/get_feed_info";
-        const target = new URL(url);
-        const requestReferer = new URL(referer);
-        if (
-          location.origin !== origin ||
-          location.pathname !== pagePath ||
-          target.origin !== origin ||
-          target.pathname !== apiPath ||
-          requestReferer.origin !== origin ||
-          requestReferer.pathname !== pagePath
-        ) {
-          throw new Error("Feed page or API origin changed before parsing");
-        }
-
-        const response = await fetch(target.href, {
-          method: "POST",
-          headers: { accept: "application/json", "content-type": "application/json" },
-          body,
-          credentials: "omit",
-          redirect: "error",
-          referrer: requestReferer.href,
-          referrerPolicy: "same-origin",
-        });
-        return {
-          status: response.status,
-          body: response.ok ? await response.text() : "",
-        };
-      },
-      args: [{ url: url.href, body: init.body, referer }],
-    });
-    return responseFromPageResult(injection?.result);
-  } catch {
-    throw new ParseError("UPSTREAM_ERROR", "视频详情页面请求失败。");
-  } finally {
-    if (typeof tabId === "number") await closeCreatedTab(chromeApi, tabId);
-  }
 }
 
 export function createExtensionRequest(
   fetchImpl = globalThis.fetch,
-  chromeApi = globalThis.chrome,
-  parseShareRequester = requestParseShareInHiddenIframe,
+  iframeRequester = requestInHiddenIframe,
 ) {
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
 
@@ -263,13 +170,18 @@ export function createExtensionRequest(
     }
 
     if (url.href === API_URLS.parseShare) {
-      return parseShareRequester(init.body);
+      return iframeRequester({ frameUrl: YUANBAO_HOME_URL, body: init.body });
     }
 
     if (endpoint.host === "channels.weixin.qq.com") {
       const referer = parseFeedPageUrl(new Headers(init.headers).get("referer"));
       if (!referer) throw new TypeError("The feed page referer is invalid");
-      return requestFeedInfoInPage(chromeApi, url, init, referer.href);
+      return iframeRequester({
+        frameUrl: CHANNELS_FEED_PAGE_URL,
+        requestUrl: url.href,
+        body: init.body,
+        referer: referer.href,
+      });
     }
 
     const headers = new Headers(init.headers);

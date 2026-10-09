@@ -4,17 +4,20 @@
   "version": "0.1.0",
   "description": "在本地解析视频号分享链接并下载视频。",
   "minimum_chrome_version": "96",
-  "permissions": ["downloads", "scripting"],
+  "permissions": ["downloads"],
   "host_permissions": [
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://yuanbao.tencent.com/*"],
+      "matches": [
+        "https://yuanbao.tencent.com/*",
+        "https://channels.weixin.qq.com/finder-preview/pages/feed*"
+      ],
       "all_frames": true,
       "run_at": "document_start",
-      "js": ["yuanbao-frame.js"]
+      "js": ["api-frame.js"]
     }
   ],
   "background": {
