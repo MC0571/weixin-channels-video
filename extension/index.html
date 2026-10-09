@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>视频号分享链接解析</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="page-header">
+        <p class="eyebrow">WEIXIN CHANNELS</p>
+        <h1>解析视频号分享链接</h1>
+        <p class="intro">粘贴公开分享链接，预览视频并保存到下载目录。</p>
+      </header>
+
+      <section class="card input-card" aria-labelledby="input-heading">
+        <h2 id="input-heading">分享链接</h2>
+        <form id="parse-form">
+          <label for="share-url">视频号链接</label>
+          <div class="form-row">
+            <input
+              id="share-url"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="url"
+              placeholder="https://weixin.qq.com/sph/..."
+              required
+            >
+            <button id="parse-button" class="primary-button" type="submit">解析视频</button>
+          </div>
+        </form>
+        <p id="parse-status" class="status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="result-card" class="card result-card" aria-labelledby="result-heading" hidden>
+        <div class="result-heading">
+          <div>
+            <p class="eyebrow">PARSE RESULT</p>
+            <h2 id="result-heading">视频信息</h2>
+          </div>
+          <button id="download-button" class="primary-button" type="button" disabled>下载视频</button>
+        </div>
+        <div class="result-grid">
+          <div class="media-column">
+            <video id="preview-video" controls preload="metadata"></video>
+            <section class="media-variants-panel" aria-labelledby="media-variants-heading">
+              <h3 id="media-variants-heading">下载视频版本</h3>
+              <ul id="media-variants" class="media-variants" aria-label="可下载视频版本"></ul>
+            </section>
+          </div>
+          <aside class="result-details">
+            <dl class="metadata">
+              <div>
+                <dt>标题</dt>
+                <dd id="video-title"></dd>
+              </div>
+              <div>
+                <dt>作者</dt>
+                <dd id="video-author"></dd>
+              </div>
+            </dl>
+            <img id="cover-image" class="cover-image" alt="视频封面" hidden>
+          </aside>
+        </div>
+      </section>
+
+      <section class="card download-card" aria-labelledby="download-heading">
+        <div>
+          <p class="eyebrow">DOWNLOADS</p>
+          <h2 id="download-heading">下载状态</h2>
+        </div>
+        <p id="download-status" class="status" role="status" aria-live="polite">正在读取下载状态…</p>
+      </section>
+
+      <footer>
+        需要在此 Chrome profile 中登录腾讯元宝。登录信息保留在浏览器内。
+        <a href="https://yuanbao.tencent.com/" target="_blank" rel="noreferrer">打开元宝登录</a>
+      </footer>
+    </main>
+  </body>
+</html>
