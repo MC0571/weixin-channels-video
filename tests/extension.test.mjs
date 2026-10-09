@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import {
   createExtensionRequest,
   downloadStatus,
@@ -8,7 +9,7 @@ import {
   safeFilename,
   startDownload,
 } from "../extension/app.mjs";
-import { API_URLS, parseShareLink } from "../src/core.mjs";
+import { API_URLS } from "../src/core.mjs";
 
 function createEvent() {
   const listeners = new Set();
@@ -19,6 +20,86 @@ function createEvent() {
       for (const listener of listeners) listener(...args);
     },
     get listenerCount() { return listeners.size; },
+  };
+}
+
+function createHiddenIframeHarness() {
+  const iframeListeners = new Map();
+  const messageListeners = new Set();
+  const requestMessages = [];
+  let removeCount = 0;
+  let timeoutCallback;
+  let timeoutCleared = false;
+  const iframe = {
+    contentWindow: {
+      postMessage(message, targetOrigin) {
+        requestMessages.push({ message, targetOrigin });
+      },
+    },
+    addEventListener(type, listener) {
+      if (!iframeListeners.has(type)) iframeListeners.set(type, new Set());
+      iframeListeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      iframeListeners.get(type)?.delete(listener);
+    },
+    setAttribute() {},
+    remove() { removeCount += 1; },
+    dispatch(type) {
+      for (const listener of [...(iframeListeners.get(type) ?? [])]) listener();
+    },
+  };
+  const windowApi = {
+    crypto: { randomUUID: () => "123e4567-e89b-42d3-a456-426614174000" },
+    addEventListener(type, listener) {
+      assert.equal(type, "message");
+      messageListeners.add(listener);
+    },
+    removeEventListener(type, listener) {
+      assert.equal(type, "message");
+      messageListeners.delete(listener);
+    },
+    setTimeout(callback, delay) {
+      assert.equal(delay, 15_000);
+      timeoutCallback = callback;
+      return 1;
+    },
+    clearTimeout(timeoutId) {
+      assert.equal(timeoutId, 1);
+      timeoutCleared = true;
+    },
+  };
+  const documentApi = {
+    createElement(tag) {
+      assert.equal(tag, "iframe");
+      return iframe;
+    },
+    body: {
+      append(element) {
+        assert.equal(element, iframe);
+        element.dispatch("load");
+      },
+    },
+  };
+
+  return {
+    documentApi,
+    windowApi,
+    iframe,
+    requestMessages,
+    dispatchMessage(message, source = iframe.contentWindow, origin = "https://yuanbao.tencent.com") {
+      for (const listener of [...messageListeners]) listener({ data: message, source, origin });
+    },
+    expire() { timeoutCallback(); },
+    get state() {
+      return {
+        iframeRemoved: removeCount === 1,
+        iframeLoadListeners: iframeListeners.get("load")?.size ?? 0,
+        iframeErrorListeners: iframeListeners.get("error")?.size ?? 0,
+        messageListeners: messageListeners.size,
+        timeoutCleared,
+      };
+    },
   };
 }
 
@@ -50,95 +131,219 @@ test("extension requests only fixed APIs with isolated credentials and browser-o
   assert.equal(calls.length, 1);
 });
 
-test("parseShare requests run in the open Yuanbao tab and return only serializable response data", async () => {
-  const previousFetch = globalThis.fetch;
-  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
-  let injected;
-  let tabQuery;
-  let pageRequest;
-  Object.defineProperty(globalThis, "location", {
-    configurable: true,
-    value: { origin: "https://yuanbao.tencent.com" },
-  });
-  globalThis.fetch = async (url, init) => {
-    pageRequest = { url, init };
-    return new Response("synthetic parse denial", { status: 403 });
-  };
-  const request = createExtensionRequest(async () => {
-    throw new Error("parse request must use the Yuanbao tab");
-  }, {
-    tabs: {
-      query: async (query) => {
-        tabQuery = query;
-        return [{ id: 12 }];
+test("parseShare uses the injected hidden-frame requester without querying or creating Yuanbao tabs", async () => {
+  const body = "{\"type\":\"video_channel_url\",\"url\":\"https://weixin.qq.com/sph/synthetic-id\",\"scene\":1}";
+  let requestedBody;
+  const request = createExtensionRequest(
+    async () => assert.fail("parseShare must use the hidden-frame requester"),
+    {
+      tabs: {
+        query: async () => assert.fail("parseShare must not query tabs"),
+        create: async () => assert.fail("parseShare must not create tabs"),
       },
+      scripting: { executeScript: async () => assert.fail("parseShare must not inject into tabs") },
     },
-    scripting: {
-      executeScript: async (details) => {
-        injected = details;
-        return [{ result: await details.func(...details.args) }];
-      },
+    async (value) => {
+      requestedBody = value;
+      return Response.json({ code: 0 });
     },
-  });
+  );
+
+  const response = await request(API_URLS.parseShare, { method: "POST", body });
+  assert.equal(requestedBody, body);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { code: 0 });
+  await assert.rejects(request(`${API_URLS.parseShare}?extra=1`, { method: "POST", body }), TypeError);
+  assert.equal(requestedBody, body);
+});
+
+test("hidden iframe requester validates the response origin, source, and ID, then cleans up", async () => {
+  const harness = createHiddenIframeHarness();
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "document", { configurable: true, value: harness.documentApi });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: harness.windowApi });
 
   try {
-    const response = await request(API_URLS.parseShare, {
-      method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json" },
-      body: "{\"type\":\"video_channel_url\"}",
-    });
-    assert.deepEqual(tabQuery, { url: "https://yuanbao.tencent.com/*" });
-    assert.equal(injected.target.tabId, 12);
-    assert.equal(injected.world, "MAIN");
-    assert.deepEqual(pageRequest, {
-      url: "https://yuanbao.tencent.com/api/weixin/get_parse_result",
-      init: {
-        method: "POST",
-        headers: { accept: "application/json", "content-type": "application/json" },
-        body: "{\"type\":\"video_channel_url\"}",
-        credentials: "include",
-        redirect: "error",
+    const chromeApi = {
+      tabs: {
+        query: async () => assert.fail("the hidden iframe must not query tabs"),
+        create: async () => assert.fail("the hidden iframe must not create tabs"),
       },
+      scripting: { executeScript: async () => assert.fail("the hidden iframe must not inject scripts") },
+    };
+    const request = createExtensionRequest(
+      async () => assert.fail("parseShare must use the hidden iframe"),
+      chromeApi,
+    );
+    const body = "{\"type\":\"video_channel_url\"}";
+    const responsePromise = request(API_URLS.parseShare, { method: "POST", body });
+    const [{ message, targetOrigin }] = harness.requestMessages;
+
+    assert.equal(harness.iframe.hidden, true);
+    assert.equal(harness.iframe.src, "https://yuanbao.tencent.com/");
+    assert.deepEqual({ ...message }, {
+      type: "weixin-channels-video:parse-request",
+      requestId: "123e4567-e89b-42d3-a456-426614174000",
+      body,
     });
-    assert.equal(response.status, 403);
-    assert.equal(await response.text(), "");
+    assert.equal(targetOrigin, "https://yuanbao.tencent.com");
+
+    const response = {
+      type: "weixin-channels-video:parse-response",
+      requestId: message.requestId,
+      status: 200,
+      body: "{\"code\":0}",
+    };
+    harness.dispatchMessage(response, {}, "https://yuanbao.tencent.com");
+    harness.dispatchMessage(response, harness.iframe.contentWindow, "https://attacker.example");
+    harness.dispatchMessage({ ...response, requestId: "223e4567-e89b-42d3-a456-426614174000" });
+    assert.equal(harness.state.iframeRemoved, false);
+    assert.equal(harness.state.messageListeners, 1);
+
+    harness.dispatchMessage(response);
+    const resolved = await responsePromise;
+    assert.deepEqual(await resolved.json(), { code: 0 });
+    assert.deepEqual(harness.state, {
+      iframeRemoved: true,
+      iframeLoadListeners: 0,
+      iframeErrorListeners: 0,
+      messageListeners: 0,
+      timeoutCleared: true,
+    });
   } finally {
-    globalThis.fetch = previousFetch;
-    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
-    else delete globalThis.location;
+    if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+    else delete globalThis.document;
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete globalThis.window;
   }
 });
 
-test("parseShare injection does not request when the selected tab has navigated to another origin", async () => {
-  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
-  const previousFetch = globalThis.fetch;
-  let fetchCalled = false;
-  Object.defineProperty(globalThis, "location", {
-    configurable: true,
-    value: { origin: "https://attacker.example" },
-  });
-  globalThis.fetch = async () => {
-    fetchCalled = true;
-    return Response.json({});
-  };
-  const request = createExtensionRequest(async () => assert.fail("must use the Yuanbao tab"), {
-    tabs: { query: async () => [{ id: 12 }] },
-    scripting: {
-      executeScript: async (details) => [{ result: await details.func(...details.args) }],
-    },
-  });
+test("hidden iframe requester cleans up on status 0 and timeout", async () => {
+  for (const failure of ["status-zero", "timeout"]) {
+    const harness = createHiddenIframeHarness();
+    const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "document", { configurable: true, value: harness.documentApi });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: harness.windowApi });
 
-  try {
-    await assert.rejects(
-      request(API_URLS.parseShare, { method: "POST", body: "{}" }),
-      /origin changed/,
-    );
-    assert.equal(fetchCalled, false);
-  } finally {
-    globalThis.fetch = previousFetch;
-    if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
-    else delete globalThis.location;
+    try {
+      const request = createExtensionRequest(async () => assert.fail("parseShare must use the hidden iframe"));
+      const responsePromise = request(API_URLS.parseShare, { method: "POST", body: "{}" });
+      if (failure === "status-zero") {
+        const [{ message }] = harness.requestMessages;
+        harness.dispatchMessage({
+          type: "weixin-channels-video:parse-response",
+          requestId: message.requestId,
+          status: 0,
+          body: "",
+        });
+        await assert.rejects(responsePromise, /request failed/);
+      } else {
+        harness.expire();
+        await assert.rejects(responsePromise, /request timed out/);
+      }
+      assert.deepEqual(harness.state, {
+        iframeRemoved: true,
+        iframeLoadListeners: 0,
+        iframeErrorListeners: 0,
+        messageListeners: 0,
+        timeoutCleared: true,
+      });
+    } finally {
+      if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+      else delete globalThis.document;
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else delete globalThis.window;
+    }
   }
+});
+
+test("Yuanbao frame script accepts only its extension parent and fetches the fixed same-origin API", async () => {
+  const source = await readFile(new URL("../extension/yuanbao-frame.js", import.meta.url), "utf8");
+  const extensionOrigin = "chrome-extension://synthetic-extension-id";
+  assert.equal(new URL(`${extensionOrigin}/`).origin, "null");
+  const requestId = "123e4567-e89b-42d3-a456-426614174000";
+  const messages = [];
+  const fetchCalls = [];
+  let resolveResponse;
+  const responsePosted = new Promise((resolve) => { resolveResponse = resolve; });
+  const parent = {
+    postMessage(message, targetOrigin) {
+      messages.push({ message, targetOrigin });
+      resolveResponse();
+    },
+  };
+  const listeners = new Map();
+  const windowApi = {
+    parent,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    },
+  };
+  const fetch = async (url, init) => {
+    fetchCalls.push({ url, init });
+    return { status: 200, ok: true, text: async () => "{\"code\":0}" };
+  };
+  runInNewContext(source, {
+    window: windowApi,
+    location: { origin: "https://yuanbao.tencent.com" },
+    chrome: { runtime: { getURL: () => `${extensionOrigin}/` } },
+    URL,
+    fetch,
+  });
+  const [onMessage] = listeners.get("message");
+  const request = {
+    type: "weixin-channels-video:parse-request",
+    requestId,
+    body: "{\"type\":\"video_channel_url\"}",
+  };
+
+  onMessage({ source: {}, origin: extensionOrigin, data: request });
+  onMessage({ source: parent, origin: "https://attacker.example", data: request });
+  onMessage({ source: parent, origin: extensionOrigin, data: { ...request, extra: true } });
+  assert.equal(fetchCalls.length, 0);
+
+  onMessage({ source: parent, origin: extensionOrigin, data: request });
+  await responsePosted;
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].url, "https://yuanbao.tencent.com/api/weixin/get_parse_result");
+  assert.equal(fetchCalls[0].init.method, "POST");
+  assert.deepEqual({ ...fetchCalls[0].init.headers }, {
+    accept: "application/json",
+    "content-type": "application/json",
+  });
+  assert.equal(fetchCalls[0].init.body, request.body);
+  assert.equal(fetchCalls[0].init.credentials, "include");
+  assert.equal(fetchCalls[0].init.redirect, "error");
+  assert.deepEqual(messages.map(({ message, targetOrigin }) => ({
+    message: { ...message },
+    targetOrigin,
+  })), [{
+    message: {
+      type: "weixin-channels-video:parse-response",
+      requestId,
+      status: 200,
+      body: "{\"code\":0}",
+    },
+    targetOrigin: extensionOrigin,
+  }]);
+  onMessage({
+    source: parent,
+    origin: extensionOrigin,
+    data: { ...request, requestId: "223e4567-e89b-42d3-a456-426614174000" },
+  });
+  assert.equal(fetchCalls.length, 1);
+
+  const topWindow = {
+    addEventListener() { assert.fail("the top Yuanbao page must not register a listener"); },
+  };
+  topWindow.parent = topWindow;
+  runInNewContext(source, {
+    window: topWindow,
+    location: { origin: "https://yuanbao.tencent.com" },
+  });
 });
 
 test("feed requests use a temporary same-origin preview tab and the core token referer", async () => {
@@ -333,32 +538,6 @@ test("feed requests stop and remove listeners when the temporary tab is closed w
   assert.equal(onRemoved.listenerCount, 0);
 });
 
-test("parseShare requests explain when no Yuanbao tab is open and leave other requests unchanged", async () => {
-  const calls = [];
-  const request = createExtensionRequest(async (url, init) => {
-    calls.push({ url, init });
-    return new Response(JSON.stringify({
-      userId: "synthetic-user",
-      needRefreshToken: false,
-      anonUser: { isAnon: false },
-    }));
-  }, {
-    tabs: { query: async () => [] },
-    scripting: { executeScript: async () => assert.fail("must not inject without a tab") },
-  });
-
-  await assert.rejects(
-    parseShareLink("https://weixin.qq.com/sph/share-id", { request }),
-    (error) => {
-      assert.equal(error.code, "LOGIN_CHECK_FAILED");
-      assert.equal(error.message, "请在当前 Chrome 中打开已登录的元宝页面，并保持该标签页打开。");
-      return true;
-    },
-  );
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, API_URLS.userInfo);
-});
-
 test("download filenames are safe and existing files are uniquified", async () => {
   let options;
   const chromeApi = {
@@ -417,6 +596,12 @@ test("manifest requests only required extension and upstream-host permissions", 
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*",
   ]);
+  assert.deepEqual(manifest.content_scripts, [{
+    matches: ["https://yuanbao.tencent.com/*"],
+    all_frames: true,
+    run_at: "document_start",
+    js: ["yuanbao-frame.js"],
+  }]);
   assert.equal(manifest.background.service_worker, "background.mjs");
   assert.equal(manifest.action.default_popup, undefined);
 });

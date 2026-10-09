@@ -9,6 +9,12 @@ const CHANNELS_ORIGIN = "https://channels.weixin.qq.com";
 const CHANNELS_FEED_PAGE_PATH = "/finder-preview/pages/feed";
 const CHANNELS_FEED_API_PATH = "/finder-preview/api/feed/get_feed_info";
 const CHANNELS_FEED_PAGE_URL = `${CHANNELS_ORIGIN}${CHANNELS_FEED_PAGE_PATH}`;
+const YUANBAO_ORIGIN = "https://yuanbao.tencent.com";
+const YUANBAO_HOME_URL = `${YUANBAO_ORIGIN}/`;
+const YUANBAO_PARSE_REQUEST_TYPE = "weixin-channels-video:parse-request";
+const YUANBAO_PARSE_RESPONSE_TYPE = "weixin-channels-video:parse-response";
+const YUANBAO_IFRAME_TIMEOUT_MS = 15_000;
+const REQUEST_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TAB_LOAD_TIMEOUT_MS = 15_000;
 
 function parseFeedPageUrl(value) {
@@ -93,6 +99,89 @@ function responseFromPageResult(result) {
   });
 }
 
+function requestParseShareInHiddenIframe(
+  body,
+  documentApi = globalThis.document,
+  windowApi = globalThis.window,
+) {
+  if (typeof body !== "string") throw new TypeError("The parse request body must be a string");
+
+  const requestId = windowApi.crypto.randomUUID();
+  if (!REQUEST_ID_PATTERN.test(requestId)) throw new TypeError("A unique request ID is unavailable");
+
+  const iframe = documentApi.createElement("iframe");
+  iframe.hidden = true;
+  iframe.title = "";
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.tabIndex = -1;
+  iframe.src = YUANBAO_HOME_URL;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId;
+    const cleanup = () => {
+      windowApi.clearTimeout(timeoutId);
+      iframe.removeEventListener("load", onLoad);
+      iframe.removeEventListener("error", onError);
+      windowApi.removeEventListener("message", onMessage);
+      iframe.remove();
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onLoad = () => {
+      try {
+        iframe.contentWindow?.postMessage({
+          type: YUANBAO_PARSE_REQUEST_TYPE,
+          requestId,
+          body,
+        }, YUANBAO_ORIGIN);
+      } catch {
+        finish(reject, new Error("The Yuanbao iframe request could not be sent"));
+      }
+    };
+    const onError = () => finish(reject, new Error("The Yuanbao iframe failed to load"));
+    const onMessage = (event) => {
+      if (event.source !== iframe.contentWindow || event.origin !== YUANBAO_ORIGIN) return;
+      const message = event.data;
+      if (
+        !message ||
+        typeof message !== "object" ||
+        Array.isArray(message) ||
+        Object.keys(message).length !== 4 ||
+        message.type !== YUANBAO_PARSE_RESPONSE_TYPE ||
+        message.requestId !== requestId ||
+        !Number.isInteger(message.status) ||
+        (message.status !== 0 && (message.status < 200 || message.status > 599)) ||
+        typeof message.body !== "string"
+      ) {
+        return;
+      }
+      if (message.status === 0) {
+        finish(reject, new Error("The Yuanbao iframe request failed"));
+        return;
+      }
+      try {
+        finish(resolve, responseFromPageResult(message));
+      } catch {
+        finish(reject, new Error("The Yuanbao iframe returned an invalid response"));
+      }
+    };
+
+    iframe.addEventListener("load", onLoad);
+    iframe.addEventListener("error", onError);
+    windowApi.addEventListener("message", onMessage);
+    timeoutId = windowApi.setTimeout(
+      () => finish(reject, new Error("The Yuanbao iframe request timed out")),
+      YUANBAO_IFRAME_TIMEOUT_MS,
+    );
+    (documentApi.body ?? documentApi.documentElement).append(iframe);
+  });
+}
+
 async function requestFeedInfoInPage(chromeApi, url, init, referer) {
   let tabId;
   try {
@@ -147,7 +236,11 @@ async function requestFeedInfoInPage(chromeApi, url, init, referer) {
   }
 }
 
-export function createExtensionRequest(fetchImpl = globalThis.fetch, chromeApi = globalThis.chrome) {
+export function createExtensionRequest(
+  fetchImpl = globalThis.fetch,
+  chromeApi = globalThis.chrome,
+  parseShareRequester = requestParseShareInHiddenIframe,
+) {
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
 
   return async (value, init = {}) => {
@@ -162,41 +255,15 @@ export function createExtensionRequest(fetchImpl = globalThis.fetch, chromeApi =
     if (!endpoint || url.username || url.password || url.hash) {
       throw new TypeError("Only fixed upstream API endpoints are allowed");
     }
+    if (endpoint.host === "yuanbao.tencent.com" && ![API_URLS.userInfo, API_URLS.parseShare].includes(url.href)) {
+      throw new TypeError("Only fixed upstream API endpoints are allowed");
+    }
     if (String(init.method || "GET").toUpperCase() !== endpoint.method) {
       throw new TypeError("Method is not allowed for this API endpoint");
     }
 
     if (url.href === API_URLS.parseShare) {
-      const [tab] = await chromeApi.tabs.query({ url: "https://yuanbao.tencent.com/*" });
-      if (typeof tab?.id !== "number") {
-        throw new ParseError(
-          "LOGIN_CHECK_FAILED",
-          "请在当前 Chrome 中打开已登录的元宝页面，并保持该标签页打开。",
-        );
-      }
-
-      const [injection] = await chromeApi.scripting.executeScript({
-        target: { tabId: tab.id },
-        world: "MAIN",
-        func: async (body) => {
-          if (location.origin !== "https://yuanbao.tencent.com") {
-            throw new Error("Yuanbao tab origin changed before parsing");
-          }
-          const response = await fetch("https://yuanbao.tencent.com/api/weixin/get_parse_result", {
-            method: "POST",
-            headers: { accept: "application/json", "content-type": "application/json" },
-            body,
-            credentials: "include",
-            redirect: "error",
-          });
-          return {
-            status: response.status,
-            body: [401, 403].includes(response.status) ? "" : await response.text(),
-          };
-        },
-        args: [init.body],
-      });
-      return responseFromPageResult(injection?.result);
+      return parseShareRequester(init.body);
     }
 
     if (endpoint.host === "channels.weixin.qq.com") {
