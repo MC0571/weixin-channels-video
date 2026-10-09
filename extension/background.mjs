@@ -6,6 +6,7 @@ const FEED_REQUEST_TYPE = "weixin-channels-video:feed-request";
 const FEED_RULE_ID = 1;
 const FEED_TIMEOUT_MS = 15_000;
 const FEED_REQUEST_ID_PATTERN = /^[0-9a-f]{1,16}-[0-9a-f]{8}$/;
+const AGENT_SESSION_FRAGMENT_PATTERN = /^#session=[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FAILURE_RESULT = { status: 0, body: "", failure: "failed" };
 
 // Each request atomically replaces this rule, so that operation retries cleanup if startup fails.
@@ -22,11 +23,18 @@ function hasExactKeys(value, keys) {
     keys.every((key) => Object.hasOwn(value, key));
 }
 
+function isAllowedFeedSender(sender) {
+  if (sender?.url === chrome.runtime.getURL("index.html")) return true;
+  const agentUrl = chrome.runtime.getURL("agent.html");
+  if (typeof sender?.url !== "string" || !sender.url.startsWith(`${agentUrl}#`)) return false;
+  return AGENT_SESSION_FRAGMENT_PATTERN.test(sender.url.slice(agentUrl.length));
+}
+
 function validateFeedRequest(message, sender) {
   if (
     sender?.id !== chrome.runtime.id ||
     sender.frameId !== 0 ||
-    sender.url !== chrome.runtime.getURL("index.html") ||
+    !isAllowedFeedSender(sender) ||
     !hasExactKeys(message, ["type", "url", "referer", "body"]) ||
     message.type !== FEED_REQUEST_TYPE ||
     typeof message.url !== "string" ||

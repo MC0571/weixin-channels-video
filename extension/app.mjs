@@ -1,4 +1,5 @@
 import { API_URLS, ParseError, parseShareLink } from "../src/core.mjs";
+import { isSafeRelativeMp4Filename } from "../src/native-messaging.mjs";
 
 const ENDPOINTS = new Map([
   [API_URLS.userInfo, { method: "GET", host: "yuanbao.tencent.com" }],
@@ -198,8 +199,9 @@ export function safeFilename(title) {
   return `${name || "weixin-video"}.mp4`;
 }
 
-export async function startDownload(result, chromeApi = globalThis.chrome) {
+export async function startDownload(result, chromeApi = globalThis.chrome, filename = safeFilename(result.title)) {
   if (!chromeApi?.downloads?.download) throw new TypeError("Chrome downloads API is unavailable");
+  if (!isSafeRelativeMp4Filename(filename)) throw new TypeError("Only safe relative MP4 filenames are allowed");
   const url = new URL(result.downloadUrl);
   if (url.protocol !== "https:" || url.username || url.password) {
     throw new TypeError("Only HTTPS media URLs can be downloaded");
@@ -207,8 +209,57 @@ export async function startDownload(result, chromeApi = globalThis.chrome) {
 
   return chromeApi.downloads.download({
     url: url.href,
-    filename: safeFilename(result.title),
+    filename,
     conflictAction: "uniquify",
+  });
+}
+
+export async function waitForDownload(downloadId, chromeApi = globalThis.chrome, timeoutMs = 29 * 60_000) {
+  if (!Number.isInteger(downloadId) || downloadId < 0 || !chromeApi?.downloads?.onChanged) {
+    throw new TypeError("Chrome download tracking is unavailable");
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId;
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      chromeApi.downloads.onChanged.removeListener(onChanged);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const readTerminalDownload = async () => {
+      let item;
+      try {
+        [item] = await chromeApi.downloads.search({ id: downloadId });
+      } catch {
+        finish(reject, new Error("DOWNLOAD_STATUS_UNAVAILABLE"));
+        return;
+      }
+      if (!item || !["complete", "interrupted"].includes(item.state)) return;
+      if (!Number.isInteger(item.bytesReceived) || item.bytesReceived <= 0 || typeof item.filename !== "string" || !item.filename) {
+        finish(reject, new Error("DOWNLOAD_EMPTY"));
+        return;
+      }
+      finish(resolve, {
+        state: item.state,
+        path: item.filename,
+        bytes: item.bytesReceived,
+      });
+    };
+    const onChanged = (delta) => {
+      if (delta.id === downloadId && (delta.state?.current === "complete" || delta.state?.current === "interrupted")) {
+        void readTerminalDownload();
+      }
+    };
+
+    chromeApi.downloads.onChanged.addListener(onChanged);
+    timeoutId = setTimeout(() => finish(reject, new Error("DOWNLOAD_TIMEOUT")), timeoutMs);
+    void readTerminalDownload();
   });
 }
 
@@ -438,6 +489,6 @@ function initializePage() {
   void refreshDownloadStatus();
 }
 
-if (typeof document !== "undefined" && globalThis.chrome?.downloads) {
+if (typeof document !== "undefined" && document.querySelector("#parse-form") && globalThis.chrome?.downloads) {
   initializePage();
 }

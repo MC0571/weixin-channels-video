@@ -8,6 +8,7 @@ import {
   latestDownload,
   safeFilename,
   startDownload,
+  waitForDownload,
 } from "../extension/app.mjs";
 import { API_URLS } from "../src/core.mjs";
 
@@ -514,6 +515,25 @@ test("background feed bridge serializes referer rules and cleans up after networ
   });
 });
 
+test("background feed bridge permits only the session-bound agent page as an additional sender", async () => {
+  await withBackgroundHarness({}, async ({ extensionId, fetchCalls, send }) => {
+    const request = createFeedRequest();
+    const sessionUrl = `chrome-extension://${extensionId}/agent.html#session=123e4567-e89b-42d3-a456-426614174000`;
+    const invalidUrls = [
+      `chrome-extension://${extensionId}/agent.html`,
+      `chrome-extension://${extensionId}/agent.html?session=123e4567-e89b-42d3-a456-426614174000`,
+      `chrome-extension://${extensionId}/agent.html#session=not-a-session`,
+      `chrome-extension://${extensionId}/other.html#session=123e4567-e89b-42d3-a456-426614174000`,
+    ];
+    for (const url of invalidUrls) {
+      assert.equal(await send(request, { id: extensionId, frameId: 0, url }), undefined);
+    }
+    assert.equal(fetchCalls.length, 0);
+    assert.equal((await send(request, { id: extensionId, frameId: 0, url: sessionUrl })).status, 200);
+    assert.equal(fetchCalls.length, 1);
+  });
+});
+
 test("download filenames are safe and existing files are uniquified", async () => {
   let options;
   const chromeApi = {
@@ -537,6 +557,12 @@ test("download filenames are safe and existing files are uniquified", async () =
   assert.equal(options.filename.includes(".."), false);
   assert.equal(options.conflictAction, "uniquify");
   assert.equal("saveAs" in options, false);
+  await startDownload({ title: "unused", downloadUrl: "https://media.example/video.mp4" }, chromeApi, "Clips/custom.mp4");
+  assert.equal(options.filename, "Clips/custom.mp4");
+  await assert.rejects(
+    startDownload({ title: "clip", downloadUrl: "https://media.example/video.mp4" }, chromeApi, "../unsafe.mp4"),
+    TypeError,
+  );
   await assert.rejects(
     startDownload({ title: "clip", downloadUrl: "javascript:alert(1)" }, chromeApi),
     TypeError,
@@ -565,10 +591,59 @@ test("download status survives reopening through Chrome's own recent download hi
   assert.equal(downloadStatus(null), "还没有下载记录。");
 });
 
+test("waitForDownload follows one Chrome ID through its terminal state and removes its listener", async () => {
+  const listeners = new Set();
+  const current = { id: 42, state: "in_progress", filename: "/Users/test/Downloads/clip.mp4", bytesReceived: 0 };
+  const searchQueries = [];
+  const chromeApi = {
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      async search(query) {
+        searchQueries.push(query);
+        return [current];
+      },
+    },
+  };
+  const pending = waitForDownload(42, chromeApi, 1000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(listeners.size, 1);
+  current.state = "complete";
+  current.bytesReceived = 1234;
+  for (const listener of [...listeners]) listener({ id: 42, state: { current: "complete" } });
+  assert.deepEqual(await pending, {
+    state: "complete",
+    path: "/Users/test/Downloads/clip.mp4",
+    bytes: 1234,
+  });
+  assert.deepEqual(searchQueries, [{ id: 42 }, { id: 42 }]);
+  assert.equal(listeners.size, 0);
+});
+
+test("waitForDownload times out with zero listeners and rejects zero-byte terminal downloads", async () => {
+  const listeners = new Set();
+  const chromeApi = {
+    downloads: {
+      onChanged: {
+        addListener(listener) { listeners.add(listener); },
+        removeListener(listener) { listeners.delete(listener); },
+      },
+      async search() { return [{ id: 12, state: "in_progress", filename: "/tmp/clip.mp4", bytesReceived: 0 }]; },
+    },
+  };
+  await assert.rejects(waitForDownload(12, chromeApi, 10), /DOWNLOAD_TIMEOUT/);
+  assert.equal(listeners.size, 0);
+  chromeApi.downloads.search = async () => [{ id: 12, state: "complete", filename: "/tmp/clip.mp4", bytesReceived: 0 }];
+  await assert.rejects(waitForDownload(12, chromeApi, 100), /DOWNLOAD_EMPTY/);
+  assert.equal(listeners.size, 0);
+});
+
 test("manifest requests only required extension and upstream-host permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url)));
   assert.equal(manifest.minimum_chrome_version, "101");
-  assert.deepEqual(manifest.permissions, ["downloads", "declarativeNetRequestWithHostAccess"]);
+  assert.deepEqual(manifest.permissions, ["downloads", "declarativeNetRequestWithHostAccess", "nativeMessaging"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*",

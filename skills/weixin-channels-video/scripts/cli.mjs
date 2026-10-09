@@ -1,97 +1,202 @@
 #!/usr/bin/env node
-import { API_URLS, checkLogin, ParseError, parseShareLink } from '../../../src/core.mjs';
-import { createCookieRequest } from '../../../src/cookie-request.mjs';
-import { listChromeProfiles, resolveChromeProfile } from './chrome-profile.mjs';
-import { readChromeCookieHeaders } from './cookie-process.mjs';
-import { saveExistingFile, saveMedia } from './save-media.mjs';
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { PARSE_ERROR_MESSAGES } from "../../../src/core.mjs";
+import { BRIDGE_ERROR_MESSAGES, isSafeRelativeMp4Filename, validateBridgeCommand } from "../../../src/native-messaging.mjs";
+import { BridgeSetupError, installBridge, listBridgeProfiles, readBridgeInstallation, readBridgeSession, writeBridgeSession } from "./bridge-install.mjs";
+import { BridgeError, requestBridge, waitForBridge } from "./bridge-client.mjs";
 
-const keychainNotice = 'The local Python helper may call /usr/bin/security via browser-cookie3 to request Chrome Safe Storage from macOS Keychain if matching encrypted cookies need decryption. The request is for Chrome Safe Storage itself; cookie matching is limited to yuanbao.tencent.com. “Allow” is for this request; “Always Allow” persists. You choose in the macOS prompt.';
+const USAGE = "Usage: cli.mjs list-profiles | install-bridge --extension-id ID --profile NAME | status | connect | parse --url URL | download --url URL [--filename RELATIVE.mp4]";
+const CHROME_EXECUTABLE = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const ERROR_MESSAGES = Object.freeze({ ...PARSE_ERROR_MESSAGES, ...BRIDGE_ERROR_MESSAGES });
 
-function parseOptions(args) {
+function parseArguments(command, args) {
+  const allowed = {
+    "list-profiles": [],
+    "install-bridge": ["extension-id", "profile"],
+    status: [],
+    connect: [],
+    parse: ["url"],
+    download: ["url", "filename"],
+  }[command];
+  if (!allowed) throw new Error("USAGE");
   const options = {};
-  const positional = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (!argument.startsWith('--')) {
-      positional.push(argument);
-      continue;
-    }
+    if (!argument.startsWith("--")) throw new Error("USAGE");
     const key = argument.slice(2);
-    if (!['profile', 'url', 'output'].includes(key) || options[key] !== undefined || !args[index + 1] || args[index + 1].startsWith('--')) {
-      throw new Error(`Invalid or incomplete option: ${argument}`);
+    const value = args[index + 1];
+    if (!allowed.includes(key) || options[key] !== undefined || !value || value.startsWith("--")) {
+      throw new Error("USAGE");
     }
-    options[key] = args[index + 1];
+    options[key] = value;
     index += 1;
   }
-  return { options, positional };
+  if (command === "install-bridge" && (!options["extension-id"] || !options.profile)) throw new Error("USAGE");
+  if (["parse", "download"].includes(command) && !options.url) throw new Error("USAGE");
+  if (options.filename && !isSafeRelativeMp4Filename(options.filename)) throw new Error("INVALID_FILENAME");
+  return options;
 }
 
-async function selectedProfile(profileRef) {
-  const profile = await resolveChromeProfile(profileRef);
-  console.error(keychainNotice);
-  return profile;
+async function launchChrome(config, sessionId) {
+  const url = `chrome-extension://${config.extensionId}/agent.html#session=${sessionId}`;
+  const child = spawn(CHROME_EXECUTABLE, [
+    `--user-data-dir=${config.chromeUserDataDir}`,
+    `--profile-directory=${config.profileDirectory}`,
+    url,
+  ], { detached: true, stdio: "ignore" });
+  try {
+    await once(child, "spawn");
+    child.unref();
+  } catch {
+    throw new BridgeError("CHROME_UNAVAILABLE", ERROR_MESSAGES.CHROME_UNAVAILABLE);
+  }
 }
 
-function localDownloadRequest(profile) {
-  let cookieHeaders;
-  return async (value, init = {}) => {
-    const url = new URL(typeof value === 'string' ? value : value.href);
-    let cookie = '';
-    if (url.origin === new URL(API_URLS.userInfo).origin) {
-      cookieHeaders ??= readChromeCookieHeaders(profile.cookieDb, [API_URLS.userInfo, API_URLS.parseShare]);
-      const headers = await cookieHeaders;
-      cookie = headers.get(`${url.origin}${url.pathname}`);
-      if (cookie === undefined) throw new Error('No URL-matched Chrome cookie result is available.');
-    }
-    return createCookieRequest(cookie)(value, init);
-  };
-}
-
-function printProfiles(profiles) {
-  for (const { directory, name } of profiles) console.log(`${JSON.stringify(directory)}\t${JSON.stringify(name)}`);
-}
-
-async function run(argv) {
+export async function runCli(argv, {
+  stdout = (value) => process.stdout.write(`${value}\n`),
+  stderr = (value) => process.stderr.write(`${value}\n`),
+  launch = launchChrome,
+  install = installBridge,
+  listProfiles = listBridgeProfiles,
+  readInstallation = readBridgeInstallation,
+  readSession = readBridgeSession,
+  writeSession = writeBridgeSession,
+  bridgeRequest = requestBridge,
+  bridgeWait = waitForBridge,
+} = {}) {
   const [command, ...args] = argv;
-  if (!command || command === 'help' || command === '--help') {
-    console.log('Usage: cli.mjs list-profiles | check-login [--profile <directory-or-name>] | download --url <share-link> --output <file> [--profile <directory-or-name>] | save-existing <source-file> --output <file>');
-    return;
+  if (!command || command === "help" || command === "--help") {
+    stdout(USAGE);
+    return 0;
   }
-  const { options, positional } = parseOptions(args);
 
-  if (command === 'list-profiles') {
-    if (args.length) throw new Error('list-profiles takes no options.');
-    printProfiles(await listChromeProfiles());
-    return;
+  let options;
+  try { options = parseArguments(command, args); }
+  catch (error) {
+    if (error.message === "INVALID_FILENAME") {
+      stderr("Filename must be a safe relative .mp4 path.");
+      return 2;
+    }
+    stderr(USAGE);
+    return 2;
   }
-  if (command === 'check-login') {
-    if (positional.length || options.url || options.output) throw new Error('check-login accepts only --profile.');
-    const profile = await selectedProfile(options.profile);
-    const cookies = await readChromeCookieHeaders(profile.cookieDb, [API_URLS.userInfo]);
-    const result = await checkLogin(createCookieRequest(cookies.get(new URL(API_URLS.userInfo).href)));
-    console.log(result.status);
-    return;
+
+  try {
+    if (command === "list-profiles") {
+      const profiles = await listProfiles();
+      for (const profile of profiles) stdout(JSON.stringify(profile));
+      return 0;
+    }
+    if (command === "install-bridge") {
+      const result = await install({ extensionId: options["extension-id"], profile: options.profile });
+      stdout(JSON.stringify({ installed: true, profile: result.profile.name, extensionId: result.config.extensionId }));
+      return 0;
+    }
+
+    const config = await readInstallation();
+    if (!config) {
+      if (command === "status") {
+        stdout(JSON.stringify({ configuration: "unconfigured", connection: "disconnected", login: "not_checked" }));
+        return 0;
+      }
+      throw new BridgeError("BRIDGE_NOT_CONFIGURED", BRIDGE_ERROR_MESSAGES.BRIDGE_NOT_CONFIGURED);
+    }
+    const sessionId = await readSession(config);
+
+    if (command === "status") {
+      if (!sessionId) {
+        stdout(JSON.stringify({ configuration: "configured", connection: "disconnected", login: "not_checked" }));
+        return 0;
+      }
+      const id = randomUUID();
+      try {
+        const result = await bridgeRequest(config, sessionId, { id, command: "status" }, { timeoutMs: 30_000 });
+        if (!["authenticated", "anonymous"].includes(result?.login)) throw new BridgeError("BRIDGE_PROTOCOL_ERROR", "ignored");
+        stdout(JSON.stringify({ configuration: "configured", connection: "connected", login: result.login }));
+      } catch (error) {
+        if (error instanceof BridgeError && error.code === "LOGIN_CHECK_FAILED") {
+          stdout(JSON.stringify({ configuration: "configured", connection: "connected", login: "failed:LOGIN_CHECK_FAILED" }));
+          return 1;
+        }
+        const code = error instanceof BridgeError ? error.code : "BRIDGE_PROTOCOL_ERROR";
+        if (code === "BRIDGE_DISCONNECTED") {
+          stdout(JSON.stringify({ configuration: "configured", connection: "disconnected", login: "not_checked" }));
+          return 0;
+        }
+        stdout(JSON.stringify({ configuration: "configured", connection: `failed:${code}`, login: "not_checked" }));
+        return 1;
+      }
+      return 0;
+    }
+
+    if (command === "connect") {
+      if (sessionId) {
+        try {
+          await bridgeWait(config, sessionId, { timeoutMs: 500 });
+          stdout("Connected to the Chrome extension.");
+          return 0;
+        } catch (error) {
+          if (error instanceof BridgeError && error.code !== "BRIDGE_TIMEOUT") throw error;
+          // A timed-out session can be replaced; other bridge failures need attention.
+        }
+      }
+      const nextSessionId = randomUUID();
+      await writeSession(config, nextSessionId);
+      await launch(config, nextSessionId);
+      await bridgeWait(config, nextSessionId, { timeoutMs: 30_000 });
+      stdout("Connected to the Chrome extension.");
+      return 0;
+    }
+
+    if (command === "parse" || command === "download") {
+      if (!sessionId) throw new BridgeError("BRIDGE_DISCONNECTED", BRIDGE_ERROR_MESSAGES.BRIDGE_DISCONNECTED);
+      const request = command === "parse"
+        ? { id: randomUUID(), command, url: options.url }
+        : {
+            id: randomUUID(),
+            command,
+            url: options.url,
+            ...(options.filename ? { filename: options.filename } : {}),
+          };
+      if (!validateBridgeCommand(request)) throw new BridgeError("INVALID_COMMAND", BRIDGE_ERROR_MESSAGES.INVALID_COMMAND);
+      const timeoutMs = command === "download" ? 31 * 60_000 : 90_000;
+      let result;
+      try { result = await bridgeRequest(config, sessionId, request, { timeoutMs }); }
+      catch (error) {
+        if (command === "download" && error instanceof BridgeError && error.details) {
+          stdout(JSON.stringify(error.details));
+          return 1;
+        }
+        throw error;
+      }
+      stdout(JSON.stringify(result));
+      if (command === "download" && result.state === "interrupted") return 1;
+      return 0;
+    }
+  } catch (error) {
+    const code = error instanceof BridgeError || error instanceof BridgeSetupError
+      ? error.code
+      : command === "install-bridge" || command === "list-profiles" ? "BRIDGE_INSTALL_FAILED" : "BRIDGE_CONFIG_INVALID";
+    const message = error instanceof BridgeSetupError
+      ? error.message
+      : ERROR_MESSAGES[code] ?? "请求失败。";
+    stderr(`${code}: ${message}`);
+    return 1;
   }
-  if (command === 'download') {
-    if (positional.length || !options.url || !options.output) throw new Error('download requires --url and --output.');
-    const profile = await selectedProfile(options.profile);
-    const request = localDownloadRequest(profile);
-    const video = await parseShareLink(options.url, { request });
-    const saved = await saveMedia(video.downloadUrl, options.output);
-    console.log(`Saved ${saved.path} (${saved.bytes} bytes).`);
-    return;
-  }
-  if (command === 'save-existing') {
-    if (positional.length !== 1 || !options.output || options.profile || options.url) throw new Error('save-existing requires a source file and --output.');
-    const saved = await saveExistingFile(positional[0], options.output);
-    console.log(`Saved ${saved.path} (${saved.bytes} bytes).`);
-    return;
-  }
-  throw new Error(`Unknown command: ${command}`);
+
+  stderr(USAGE);
+  return 2;
 }
 
-run(process.argv.slice(2)).catch((error) => {
-  if (error instanceof ParseError) console.error(`${error.code}: ${error.message}`);
-  else console.error(error?.message || 'Command failed.');
-  process.exitCode = 1;
-});
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  runCli(process.argv.slice(2)).then((exitCode) => {
+    process.exitCode = exitCode;
+  }).catch(() => {
+    process.stderr.write("Command failed.\n");
+    process.exitCode = 1;
+  });
+}

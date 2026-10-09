@@ -8,20 +8,17 @@ const skill = join(root, 'skills/weixin-channels-video');
 const dist = join(root, 'dist');
 await rm(dist, { recursive: true, force: true });
 await mkdir(join(dist, 'weixin-channels-video/scripts'), { recursive: true });
-for (const file of ['SKILL.md', 'requirements.txt']) {
-  await cp(join(skill, file), join(dist, 'weixin-channels-video', file));
-}
+await cp(join(skill, 'SKILL.md'), join(dist, 'weixin-channels-video/SKILL.md'));
 await cp(join(root, 'LICENSE'), join(dist, 'weixin-channels-video/LICENSE'));
-await cp(join(skill, 'scripts/cookie_reader.py'), join(dist, 'weixin-channels-video/scripts/cookie_reader.py'));
 await build({
   entryPoints: [join(skill, 'scripts/cli.mjs')],
   outfile: join(dist, 'weixin-channels-video/scripts/cli.mjs'),
   bundle: true, platform: 'node', format: 'esm', target: 'node24',
 });
 await build({
-  entryPoints: [join(skill, 'scripts/codex-browser.mjs')],
-  outfile: join(dist, 'weixin-channels-video/scripts/browser.mjs'),
-  bundle: true, platform: 'neutral', format: 'esm',
+  entryPoints: [join(root, 'src/native-host.mjs')],
+  outfile: join(dist, 'weixin-channels-video/scripts/native-host.mjs'),
+  bundle: true, platform: 'node', format: 'esm', target: 'node24',
 });
 await build({
   entryPoints: [join(root, 'extension/app.mjs')],
@@ -33,6 +30,18 @@ await build({
   outfile: join(root, 'extension/background.js'),
   bundle: true, platform: 'browser', format: 'esm', target: 'chrome101',
 });
+await build({
+  entryPoints: [join(root, 'extension/agent.mjs')],
+  outfile: join(root, 'extension/agent.js'),
+  bundle: true, platform: 'browser', format: 'esm', target: 'chrome101',
+});
 await cp(join(root, 'extension'), join(dist, 'extension'), { recursive: true });
 await cp(join(root, 'LICENSE'), join(dist, 'extension/LICENSE'));
+await mkdir(join(dist, 'weixin-channels-video/assets'), { recursive: true });
+const packagedExtension = join(dist, 'weixin-channels-video/assets/extension');
+await mkdir(packagedExtension, { recursive: true });
+for (const file of ['manifest.json', 'index.html', 'agent.html', 'styles.css', 'app.js', 'background.js', 'agent.js', 'yuanbao-frame.js']) {
+  await cp(join(root, 'extension', file), join(packagedExtension, file));
+}
+await cp(join(root, 'LICENSE'), join(packagedExtension, 'LICENSE'));
 console.log('Built standalone Skill and Chrome extension in dist/.');

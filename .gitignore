@@ -2,6 +2,7 @@ node_modules/
 dist/
 extension/app.js
 extension/background.js
+extension/agent.js
 .wrangler/
 .venv/
 __pycache__/

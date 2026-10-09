@@ -4,7 +4,7 @@ export const API_URLS = Object.freeze({
   feedInfo: "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info",
 });
 
-const MESSAGES = Object.freeze({
+export const PARSE_ERROR_MESSAGES = Object.freeze({
   INVALID_URL: "仅支持有效的微信视频号分享链接。",
   AUTH_EXPIRED: "元宝登录已失效，请重新登录。",
   LOGIN_CHECK_FAILED: "元宝登录状态检查失败。",
@@ -21,7 +21,7 @@ export class ParseError extends Error {
 }
 
 function fail(code) {
-  throw new ParseError(code, MESSAGES[code]);
+  throw new ParseError(code, PARSE_ERROR_MESSAGES[code]);
 }
 
 function isRecord(value) {

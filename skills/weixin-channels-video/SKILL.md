@@ -1,53 +1,55 @@
 ---
 name: weixin-channels-video
-description: Parse a WeChat Channels share link and save its video locally using an available logged-in Yuanbao session.
+description: 通过本机 Chrome 插件解析视频号分享链接并下载视频；首次使用时协助安装插件与本地通信桥接。
 ---
 
-# Weixin Channels video
+# 视频号解析与下载
 
-Use this skill when the user asks to parse or download a WeChat Channels share link (`https://weixin.qq.com/sph/...`). This package already carries the shared parser in its built scripts. Use those scripts to choose a request source, use the selected local session, and save media; do not reimplement the parser.
+使用包内 `scripts/cli.mjs` 调用本项目 Chrome 插件。插件复用用户自己的元宝登录态，执行共享解析核心并下载视频；Skill 不操作上游页面、不读取 Cookie 或钥匙串，不依赖 Docker、远程解析服务或 Codex Chrome 插件。
 
-## Choose how to make requests
+## 检测与首次安装
 
-Use the host's built-in browser when it is available, checking its Yuanbao login first. If it reports `anonymous`, try the local Chrome script. If a login check fails because of a network, response, or permission error, stop and report that failure; do not treat it as anonymous. If the user specifies a mode, use only that mode.
+需要 macOS、Node.js 24+ 和本机 Chrome。先执行：
 
-First identify the host's actual browser and script tools. A usable built-in mode needs access to both Yuanbao and Channels origins, shared-script execution, and local media saving. Detect Chrome from its local profile metadata without decrypting cookies. Follow the host's documented APIs; capability or permission gaps make the built-in candidate unavailable. The local CLI is the Chrome mode and is available directly for `list-profiles`, `check-login`, and `download`.
-
-## Codex App built-in browser
-
-The packaged `scripts/browser.mjs` is a self-contained ESM bundle of the shared core and the Codex adapter. Load it in the host's persistent JavaScript runtime with `const WXChannelsBuiltin = await import('file:///absolute/skill/root/scripts/browser.mjs')`, replacing the path with the installed skill location. This import has been tested in Codex App's `cua_repl`. Keep all parser/CDP response values in that runtime; print only login status, fixed error codes, or saved file paths.
-
-1. Select the in-app browser using its documented entry point. Obtain a Yuanbao tab and a Channels tab, with each tab navigated to its own permitted origin. Read the advertised `cdp` capability documentation; do not assume access is granted merely because the capability exists. Never put a token-bearing feed URL into the conversation or tool output.
-2. Bind `yuanbaoCdp = await yuanbaoTab.capabilities.get('cdp')`. Call `WXChannelsBuiltin.checkBrowserLogin(yuanbaoCdp)`. A known anonymous result allows default fallback to the Chrome CLI. A failed check is an error and must not be presented as logged out.
-3. Only when both origins and media saving are available and Yuanbao is authenticated, call `WXChannelsBuiltin.parseInBrowser(shareUrl, {yuanbaoCdp, channelsCdp})`. The adapter keeps sensitive parameters in execution context and sends each request through its own origin's CDP handle.
-4. Keep the result private in a runtime variable. Call `WXChannelsBuiltin.downloadInBrowser(result, yuanbaoTab)`; it creates and then removes a temporary media link and uses the host's `downloadMedia` capability. Return only the downloaded local path. Use the local CLI's `save-existing` command below to publish it at the requested destination without overwriting.
-
-This adapter has controlled tests; its first complete live parse-and-save acceptance is still tracked by repository Issue #5. If the host cannot load the bundle, access the second origin, or save media, do not claim built-in support in that environment. Use the Chrome route when permitted and selected by the above rules. An explicit tool approval rejection is not a reason to reproduce the rejected access through another tool.
-
-The bundle also exports `selectExecution({mode, builtin, chrome, checkLogin: WXChannelsBuiltin.checkLogin})` for hosts providing both request factories. Candidates use `{available, request}` or a lazy `{available, getRequest}`. The selector checks built-in first and never calls the Chrome factory after a valid built-in login. In a host that executes the Chrome CLI separately, follow the same sequence with the commands below rather than trying to run Cookie extraction inside a webpage.
-
-## Local Chrome mode
-
-The local runner needs Node.js, Python 3, and the exact Python dependency in `requirements.txt`. If the dependency is missing, give the user `python3 -m pip install -r <skill-root>/requirements.txt`; do not silently switch to another cookie reader.
-
-Before a local command reads cookies, explain that the Python helper may call `/usr/bin/security` through `browser-cookie3` to request the Chrome Safe Storage secret from macOS Keychain if selected encrypted cookies need decryption. The system prompt authorizes access to Chrome Safe Storage itself; the application limits cookie matching to Yuanbao. “Allow” is a one-time choice; “Always Allow” persists. The user handles the system prompt.
-
-Run the packaged `scripts/cli.mjs list-profiles`. If more than one profile exists, ask the user which one to use or pass `--profile <directory-or-name>` when they already specified it. Never search every profile for a valid session. Profile listing reads Chrome metadata only and does not request Keychain access.
-
-The local commands are:
-
-```text
-node <skill-root>/scripts/cli.mjs check-login [--profile <directory-or-name>]
-node <skill-root>/scripts/cli.mjs download --url <share-link> --output <file> [--profile <directory-or-name>]
-node <skill-root>/scripts/cli.mjs save-existing <browser-downloaded-file> --output <file>
+```sh
+node <skill-root>/scripts/cli.mjs status
 ```
 
-Chrome may need to be fully closed before local Cookie access. The helper requires a checkpointed Cookie database and refuses an active Chrome database or a pending WAL. This affects local Chrome mode only; use the built-in browser mode when it is available.
+结果分开报告配置、连接和登录状态。只有插件已连接时才检查实际元宝登录；未连接不代表未登录，检查失败不代表登录失效。
 
-If no profile is specified, select it automatically only when Chrome reports exactly one profile. A failed login check is an error, not an anonymous result. Do not print, copy into chat, or log cookies, Keychain data, `generalToken`, or authenticated URLs.
+缺少安装时，先准备包内 `assets/extension/` 目录和具体操作步骤，再取得安装与权限授权。说明插件可访问元宝和视频号站点、管理本项目的下载、为固定视频详情请求设置请求头，并通过 `nativeMessaging` 与本地桥接通信。桥接注册在当前用户的 Chrome NativeMessagingHosts，配置与 socket 仅当前用户可访问；Cookie 不交给桥接或 Agent。
 
-## Parse and save
+授权可来自本次或仍有效的既有委托，对象与权限范围相同时不重复请求。授权后，有桌面操作工具就帮助在选定 profile 的 `chrome://extensions` 中启用开发者模式并加载包内扩展；没有该能力就提供目录和最短步骤。复用已经安装的本项目扩展时核对来源与权限，不重复安装。
 
-Call the shared `parseShareLink(url, { request })` with the chosen request adapter. Save its `downloadUrl` by streaming to a temporary file in the destination directory, then publish without replacing an existing file. Report the resulting local path. Reject failed HTTP responses and empty media; actual playability is outside this skill's local save check.
+列出 profile 只读取 Chrome 元数据：
 
-The build bundles the shared parser into the standalone Skill files. The installed `dist/weixin-channels-video` folder does not depend on a checkout of this repository and does not contain a second copy of parsing rules.
+```sh
+node <skill-root>/scripts/cli.mjs list-profiles
+```
+
+使用用户已选定的 profile；有多个且用户未指定时请用户选择，不逐个尝试登录。取得扩展详情中的 ID 后执行：
+
+```sh
+node <skill-root>/scripts/cli.mjs install-bridge --extension-id <extension-id> --profile <directory-or-name>
+node <skill-root>/scripts/cli.mjs connect
+node <skill-root>/scripts/cli.mjs status
+```
+
+`connect` 打开扩展自己的 Agent 连接页面，Chrome 由此启动本地桥接。使用时保留此页面；不会打开元宝或视频号标签页。已配置但未连接时直接连接，无需再次安装。桥接程序升级或安装时使用的 Node.js 可执行文件位置变化后重新注册桥接。
+
+元宝未登录时，请用户在同一 Chrome profile 中登录，再检查状态。扫码、验证码和必须由用户完成的系统确认交给用户；工具允许代操作且已授权的普通安装步骤继续完成。
+
+## 解析与下载
+
+```sh
+node <skill-root>/scripts/cli.mjs parse --url <share-link>
+node <skill-root>/scripts/cli.mjs download --url <share-link> [--filename <relative-mp4-filename>]
+```
+
+分享链接格式为 `https://weixin.qq.com/sph/...`。下载采用共享核心的默认媒体版本；文件名相对于 Chrome 下载目录，省略时根据标题生成。位置选择遵循 Chrome 下载设置，已有文件自动改名。不要把用户的绝对保存路径直接传给 `--filename`；需要另存时，在下载完成后用宿主文件工具移动，并保留已有文件。
+
+下载命令等待 Chrome 确认完成后返回最终路径与字节数。只据此报告保存成功；中断或超时报告错误，不把开始下载当作完成。用户要求可播放验收时，再用可用的播放器或媒体工具检查文件。
+
+只返回用户需要的视频信息、下载状态与本地文件路径。不要输出 Cookie、钥匙串凭据、内部 token/eid；解析结果中的媒体链接可能含临时访问参数，除非用户需要链接，不在对话或公共日志中展开完整结果。
+
+插件或桥接不可用时报告缺少的组件，不自行回退到 Cookie 提取或重新实现解析。宿主工具明确拒绝的操作不能通过桥接改道重试。
