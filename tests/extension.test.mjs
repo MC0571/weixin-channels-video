@@ -10,7 +10,7 @@ import {
   startDownload,
   waitForDownload,
 } from "../extension/app.mjs";
-import { createAgentConnectionController, startAgent } from "../extension/agent.mjs";
+import { startAgent } from "../extension/agent.mjs";
 import { API_URLS } from "../src/core.mjs";
 
 function createHiddenIframeHarness() {
@@ -108,7 +108,7 @@ async function withHiddenIframeHarness(harness, callback) {
   }
 }
 
-async function withBackgroundHarness({ fetchImpl, timerApi } = {}, callback) {
+async function withBackgroundHarness({ fetchImpl, timerApi, initialStorage = {}, initialAlarms = {}, offscreenMessenger } = {}, callback) {
   const previousChrome = Object.getOwnPropertyDescriptor(globalThis, "chrome");
   const previousFetch = Object.getOwnPropertyDescriptor(globalThis, "fetch");
   const previousSetTimeout = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");
@@ -118,11 +118,63 @@ async function withBackgroundHarness({ fetchImpl, timerApi } = {}, callback) {
   const updates = [];
   const fetchCalls = [];
   let messageListener;
+  const event = () => {
+    const listeners = new Set();
+    return {
+      addListener(listener) { listeners.add(listener); },
+      async fire(value) {
+        return Promise.all([...listeners].map((listener) => listener(value)));
+      },
+    };
+  };
+  const onStartup = event();
+  const onInstalled = event();
+  const onAlarm = event();
+  const storage = new Map(Object.entries(initialStorage));
+  const alarms = new Map(Object.entries(initialAlarms));
+  const ports = [];
+  let offscreenCreated = false;
   const chromeApi = {
     runtime: {
       id: extensionId,
       getURL: (path) => `chrome-extension://${extensionId}/${path}`,
       onMessage: { addListener: (listener) => { messageListener = listener; } },
+      onStartup,
+      onInstalled,
+      getContexts: async (filter) => filter.contextTypes.includes("OFFSCREEN_DOCUMENT")
+        ? (offscreenCreated ? [{ contextType: "OFFSCREEN_DOCUMENT" }] : [])
+        : [],
+      sendMessage: async (message) => {
+        if (!offscreenMessenger) throw new Error("no offscreen test responder");
+        return offscreenMessenger(message);
+      },
+      connectNative: (name) => {
+        assert.equal(name, "com.mc0571.weixin_channels_video");
+        const port = {
+          onMessage: event(),
+          onDisconnect: event(),
+          messages: [],
+          disconnects: 0,
+          postMessage(value) { this.messages.push(value); },
+          disconnect() { this.disconnects += 1; void this.onDisconnect.fire(); },
+        };
+        ports.push(port);
+        return port;
+      },
+    },
+    storage: { local: {
+      async get(keys) {
+        const requested = Array.isArray(keys) ? keys : [keys];
+        return Object.fromEntries(requested.map((key) => [key, storage.get(key)]));
+      },
+      async set(values) { for (const [key, value] of Object.entries(values)) storage.set(key, value); },
+    } },
+    offscreen: { createDocument: async (options) => { offscreenCreated = true; return options; } },
+    alarms: {
+      onAlarm,
+      async clear(name) { return alarms.delete(name); },
+      async get(name) { return alarms.get(name); },
+      create(name, options) { alarms.set(name, options); },
     },
     declarativeNetRequest: {
       updateSessionRules: async (change) => {
@@ -162,7 +214,11 @@ async function withBackgroundHarness({ fetchImpl, timerApi } = {}, callback) {
       const handled = messageListener(message, sender, resolve);
       if (handled !== true) resolve(undefined);
     });
-    return await callback({ chromeApi, extensionId, fetchCalls, updates, rules, send });
+    return await callback({
+      chromeApi, extensionId, fetchCalls, updates, rules, send,
+      onStartup, onInstalled, onAlarm, storage, alarms, ports,
+      get offscreenCreated() { return offscreenCreated; },
+    });
   } finally {
     restore("chrome", previousChrome);
     restore("fetch", previousFetch);
@@ -649,7 +705,7 @@ test("waitForDownload times out with zero listeners and rejects zero-byte termin
 test("manifest requests only required extension and upstream-host permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../extension/manifest.json", import.meta.url)));
   assert.equal(manifest.minimum_chrome_version, "116");
-  assert.deepEqual(manifest.permissions, ["downloads", "declarativeNetRequestWithHostAccess", "nativeMessaging"]);
+  assert.deepEqual(manifest.permissions, ["downloads", "declarativeNetRequestWithHostAccess", "nativeMessaging", "storage", "offscreen", "alarms"]);
   assert.deepEqual(manifest.host_permissions, [
     "https://yuanbao.tencent.com/*",
     "https://channels.weixin.qq.com/*",
@@ -664,8 +720,8 @@ test("manifest requests only required extension and upstream-host permissions", 
   assert.equal(manifest.action.default_popup, undefined);
   const index = await readFile(new URL("../extension/index.html", import.meta.url), "utf8");
   assert.match(index, /src="\.\/agent\.js"/);
-  assert.match(index, /id="agent-connect-toggle"[^>]*role="switch"[^>]*aria-checked="false"/s);
-  assert.match(index, /id="agent-connect-status"[^>]*role="status"/s);
+  assert.doesNotMatch(index, /agent-connect-(?:toggle|status)/);
+  assert.match(await readFile(new URL("../extension/offscreen.html", import.meta.url), "utf8"), /offscreen\.js/);
 });
 
 test("toolbar action focuses the existing page or creates one", async () => {
@@ -680,11 +736,15 @@ test("toolbar action focuses the existing page or creates one", async () => {
     runtime: {
       getURL: (path) => `chrome-extension://synthetic-id/${path}`,
       onMessage: { addListener() {} },
+      onStartup: { addListener() {} },
+      onInstalled: { addListener() {} },
       getContexts: async (filter) => {
         assert.deepEqual(filter, { contextTypes: ["TAB"], documentUrls: ["chrome-extension://synthetic-id/index.html"] });
         return queried;
       },
     },
+    storage: { local: { get: async () => ({}), set: async () => {} } },
+    alarms: { onAlarm: { addListener() {} }, clear: async () => true, create() {} },
     windows: { update: async (id, properties) => { focusedWindows.push({ id, properties }); } },
     tabs: {
       update: async (id, properties) => { focusedTabs.push({ id, properties }); },
@@ -708,329 +768,396 @@ test("toolbar action focuses the existing page or creates one", async () => {
   }
 });
 
-test("agent controller ignores stale port callbacks and never routes old work to a new port", async () => {
-  const createEvent = () => {
-    const listeners = new Set();
-    return {
-      addListener(listener) { listeners.add(listener); },
-      fire(value) { for (const listener of [...listeners]) listener(value); },
-    };
-  };
-  const ports = [];
-  const chromeApi = {
-    runtime: {
-      connectNative(name) {
-        assert.equal(name, "com.mc0571.weixin_channels_video");
-        const port = {
-          onMessage: createEvent(),
-          onDisconnect: createEvent(),
-          messages: [],
-          postMessage(value) { this.messages.push(value); },
-          disconnect() { this.onDisconnect.fire(); },
-        };
-        ports.push(port);
-        return port;
-      },
-      get lastError() { return undefined; },
-    },
-  };
-  const attributes = new Map([["aria-checked", "false"]]);
-  let click;
-  const toggleButton = {
-    textContent: "",
-    addEventListener(type, listener) { assert.equal(type, "click"); click = listener; },
-    getAttribute(name) { return attributes.get(name); },
-    setAttribute(name, value) { attributes.set(name, value); },
-  };
-  const statusElement = { textContent: "" };
-  let finishOldWork;
-  const controller = createAgentConnectionController({
-    sessionId: "123e4567-e89b-42d3-a456-426614174000",
-    chromeApi,
-    toggleButton,
-    statusElement,
-    handleCommand: () => new Promise((resolve) => { finishOldWork = resolve; }),
+test("background restores a persisted pairing on Chrome startup without opening a page", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  await withBackgroundHarness({
+    initialStorage: { "weixin-channels-video:bridge-session": sessionId },
+  }, async (harness) => {
+    const { onStartup, ports, storage } = harness;
+    await onStartup.fire();
+    assert.equal(storage.get("weixin-channels-video:bridge-session"), sessionId);
+    assert.equal(storage.get("weixin-channels-video:bridge-retry-count"), 0);
+    assert.equal(ports.length, 1);
+    assert.deepEqual(ports[0].messages, [{ type: "hello", version: 1, sessionId }]);
+    assert.equal(harness.offscreenCreated, false);
+  });
+});
+
+test("installed and startup events reuse one restored Native Messaging connection", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  await withBackgroundHarness({
+    initialStorage: { "weixin-channels-video:bridge-session": sessionId },
+  }, async ({ onInstalled, onStartup, ports, storage }) => {
+    await onInstalled.fire();
+    await onStartup.fire();
+    assert.equal(ports.length, 1);
+    assert.deepEqual(ports[0].messages, [{ type: "hello", version: 1, sessionId }]);
+    assert.equal(storage.get("weixin-channels-video:bridge-retry-count"), 0);
+  });
+});
+
+test("worker module load restores a pairing only when no retry alarm is pending", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const pairingKey = "weixin-channels-video:bridge-session";
+  const retryKey = "weixin-channels-video:bridge-retry-count";
+  const alarmName = "weixin-channels-video:bridge-reconnect";
+
+  await withBackgroundHarness({
+    initialStorage: { [pairingKey]: sessionId, [retryKey]: 2 },
+  }, async ({ ports }) => {
+    for (let attempt = 0; attempt < 20 && ports.length === 0; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(ports.length, 1, "a worker restart can recover without a startup event");
   });
 
-  assert.equal(toggleButton.textContent, "开启 AI 连接");
-  assert.equal(attributes.get("aria-checked"), "false");
-  assert.match(statusElement.textContent, /首次使用/);
-  click();
-  const oldPort = ports[0];
-  oldPort.onMessage.fire({ type: "ready", version: 1 });
-  assert.equal(statusElement.textContent, "AI 助手已连接，使用期间请保留此页面。");
-  oldPort.onMessage.fire({ id: "323e4567-e89b-42d3-a456-426614174000", command: "status" });
-  await Promise.resolve();
+  await withBackgroundHarness({
+    initialStorage: { [pairingKey]: sessionId, [retryKey]: 2 },
+    initialAlarms: { [alarmName]: { delayInMinutes: 4 } },
+  }, async ({ onAlarm, ports, alarms, storage }) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ports.length, 0, "module loading respects the scheduled backoff");
+    assert.equal(storage.get(retryKey), 2, "module loading preserves the persisted attempt count");
+    alarms.delete(alarmName);
+    await onAlarm.fire({ name: alarmName });
+    assert.equal(ports.length, 1);
+    assert.equal(storage.get(retryKey), 2, "alarm wake does not reset the retry count");
+  });
 
-  click();
-  click();
-  const newPort = ports[1];
-  newPort.onMessage.fire({ type: "ready", version: 1 });
-  oldPort.onMessage.fire({ type: "ready", version: 1 });
-  oldPort.onDisconnect.fire();
-  assert.equal(controller.isConnected(), true);
-  assert.equal(attributes.get("aria-checked"), "true");
-  assert.equal(statusElement.textContent, "AI 助手已连接，使用期间请保留此页面。");
-
-  finishOldWork({ id: "323e4567-e89b-42d3-a456-426614174000", ok: true, result: { login: "anonymous" } });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(oldPort.messages, [{ type: "hello", version: 1, sessionId: "123e4567-e89b-42d3-a456-426614174000" }]);
-  assert.deepEqual(newPort.messages, [{ type: "hello", version: 1, sessionId: "123e4567-e89b-42d3-a456-426614174000" }]);
+  await withBackgroundHarness({
+    initialStorage: { [pairingKey]: sessionId, [retryKey]: 5 },
+  }, async ({ ports }) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ports.length, 0, "worker restarts do not bypass the retry limit");
+  });
 });
 
-test("agent controller resets after hello send failure and can reconnect", () => {
-  const createEvent = () => ({ addListener() {}, fire() {} });
-  let attempts = 0;
-  const chromeApi = {
-    runtime: {
-      connectNative: () => {
-        attempts += 1;
-        return {
-          onMessage: createEvent(),
-          onDisconnect: createEvent(),
-          disconnect() {},
-          postMessage() { if (attempts === 1) throw new Error("synthetic post failure"); },
-        };
+test("background migrates a legacy page pairing through offscreen without opening the main tab", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const messages = [];
+  await withBackgroundHarness({
+    offscreenMessenger: async (message) => {
+      messages.push(message);
+      if (message.type === "weixin-channels-video:offscreen-read-pairing") return { sessionId };
+      if (message.type === "weixin-channels-video:offscreen-clear-pairing") return { ok: true };
+      throw new Error("unexpected offscreen message");
+    },
+  }, async (harness) => {
+    const { onStartup, ports, storage } = harness;
+    await onStartup.fire();
+    assert.equal(harness.offscreenCreated, true);
+    assert.equal(storage.get("weixin-channels-video:bridge-session"), sessionId);
+    assert.deepEqual(messages, [
+      { type: "weixin-channels-video:offscreen-read-pairing" },
+      { type: "weixin-channels-video:offscreen-clear-pairing", sessionId },
+    ]);
+    assert.equal(ports.length, 1);
+    assert.deepEqual(ports[0].messages, [{ type: "hello", version: 1, sessionId }]);
+  });
+});
+
+test("pairing opens one background Native Messaging port and keeps task result fields", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  const requestId = "323e4567-e89b-42d3-a456-426614174000";
+  const shareUrl = "https://weixin.qq.com/sph/synthetic";
+  const parseBody = {
+    type: "video_channel_url",
+    url: shareUrl,
+    scene: 1,
+  };
+  const feedResult = {
+    errCode: 0,
+    data: {
+      feedInfo: {
+        description: "A title",
+        coverUrl: "https://media.example/cover.jpg",
+        h264VideoInfo: { videoUrl: "https://media.example/video.mp4" },
       },
+      authorInfo: { nickname: "An author" },
     },
   };
-  const attributes = new Map([ ["aria-checked", "false"] ]);
-  let click;
-  const toggleButton = {
-    textContent: "",
-    addEventListener(_type, listener) { click = listener; },
-    getAttribute(name) { return attributes.get(name); },
-    setAttribute(name, value) { attributes.set(name, value); },
-  };
-  const statusElement = { textContent: "" };
-  const controller = createAgentConnectionController({ sessionId: "123e4567-e89b-42d3-a456-426614174000", chromeApi, toggleButton, statusElement, handleCommand: async () => ({}) });
-
-  click();
-  assert.equal(attempts, 1);
-  assert.equal(controller.isConnected(), false);
-  assert.equal(attributes.get("aria-checked"), "false");
-  assert.match(statusElement.textContent, /检查本地连接组件/);
-  click();
-  assert.equal(attempts, 2);
-  assert.equal(controller.isConnected(), true);
-  assert.equal(attributes.get("aria-checked"), "true");
-});
-
-test("agent controller resets and reconnects when a command response cannot be sent", async () => {
-  const createEvent = () => {
-    const listeners = new Set();
-    return {
-      addListener(listener) { listeners.add(listener); },
-      fire(value) { for (const listener of [...listeners]) listener(value); },
-    };
-  };
-  const ports = [];
-  const chromeApi = {
-    runtime: {
-      connectNative: () => {
-        const port = {
-          onMessage: createEvent(),
-          onDisconnect: createEvent(),
-          disconnectCount: 0,
-          messages: [],
-          postMessage(value) {
-            if (value.type !== "hello") throw new Error("synthetic response send failure");
-            this.messages.push(value);
+  const calls = [];
+  await withBackgroundHarness({
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      if (url === API_URLS.userInfo) {
+        return Response.json({ userId: "user", needRefreshToken: false, anonUser: { isAnon: false } });
+      }
+      if (url.startsWith(API_URLS.feedInfo)) return Response.json(feedResult);
+      assert.fail("unexpected upstream URL");
+    },
+    offscreenMessenger: async (message) => {
+      assert.equal(message.type, "weixin-channels-video:offscreen-parse");
+      assert.deepEqual(JSON.parse(message.body), parseBody);
+      return {
+        status: 200,
+        body: JSON.stringify({
+          code: 0,
+          data: {
+            playable_url: "https://yuanbao.tencent.com/share?token=private-token&eid=private-eid",
+            desc: "A title",
+            author: "An author",
           },
-          disconnect() { this.disconnectCount += 1; this.onDisconnect.fire(); },
-        };
-        ports.push(port);
-        return port;
+        }),
+      };
+    },
+  }, async ({ send, ports, storage }) => {
+    assert.deepEqual(await send({ type: "weixin-channels-video:pair", sessionId }), { ok: true });
+    assert.equal(storage.get("weixin-channels-video:bridge-session"), sessionId);
+    assert.equal(ports.length, 1);
+    assert.deepEqual(ports[0].messages, [{ type: "hello", version: 1, sessionId }]);
+
+    await ports[0].onMessage.fire({ type: "ready", version: 1 });
+    await ports[0].onMessage.fire({ id: requestId, command: "parse", url: shareUrl });
+    for (let attempt = 0; attempt < 20 && ports[0].messages.length < 2; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    assert.equal(ports[0].messages.length, 2);
+    assert.deepEqual(ports[0].messages[1], {
+      id: requestId,
+      ok: true,
+      result: {
+        title: "A title",
+        author: "An author",
+        coverUrl: "https://media.example/cover.jpg",
+        previewUrl: "https://media.example/video.mp4",
+        downloadUrl: "https://media.example/video.mp4",
+        mediaVariants: [{ label: "H.264", downloadUrl: "https://media.example/video.mp4" }],
       },
+    });
+    assert.equal(JSON.stringify(ports[0].messages[1]).includes("private-token"), false);
+    assert.equal(calls.filter((call) => call.url === API_URLS.userInfo).length, 1);
+    assert.equal(calls.filter((call) => call.url.startsWith(API_URLS.feedInfo)).length, 1);
+    assert.deepEqual(await send({ type: "weixin-channels-video:pair", sessionId }), { ok: true });
+    assert.equal(ports.length, 1, "repeated pairing reuses the active port");
+  });
+});
+
+test("offscreen accepts only fixed background parse and pairing messages", async () => {
+  const harness = createHiddenIframeHarness();
+  const extensionId = "synthetic-extension-id";
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  let legacySession = sessionId;
+  const removed = [];
+  harness.windowApi.localStorage = {
+    getItem(key) {
+      assert.equal(key, "weixin-channels-video:bridge-session");
+      return legacySession;
+    },
+    removeItem(key) {
+      assert.equal(key, "weixin-channels-video:bridge-session");
+      legacySession = null;
+      removed.push(key);
     },
   };
-  const attributes = new Map([["aria-checked", "false"]]);
-  let click;
-  const toggleButton = {
-    textContent: "",
-    addEventListener(_type, listener) { click = listener; },
-    getAttribute(name) { return attributes.get(name); },
-    setAttribute(name, value) { attributes.set(name, value); },
+  const previousChrome = Object.getOwnPropertyDescriptor(globalThis, "chrome");
+  let listener;
+  globalThis.chrome = {
+    runtime: {
+      id: extensionId,
+      getURL: (path) => "chrome-extension://" + extensionId + "/" + path,
+      onMessage: { addListener: (callback) => { listener = callback; } },
+    },
   };
-  const statusElement = { textContent: "" };
-  const controller = createAgentConnectionController({
-    sessionId: "123e4567-e89b-42d3-a456-426614174000",
-    chromeApi,
-    toggleButton,
-    statusElement,
-    handleCommand: async (request) => ({ id: request.id, ok: true, result: {} }),
-  });
+  try {
+    await withHiddenIframeHarness(harness, async () => {
+      await import("../extension/offscreen.mjs?test=" + Date.now() + "-" + Math.random());
+      const workerSender = {
+        id: extensionId,
+      };
+      let migrated;
+      listener({ type: "weixin-channels-video:offscreen-read-pairing" }, workerSender, (value) => { migrated = value; });
+      assert.deepEqual(migrated, { sessionId });
 
-  click();
-  const failedPort = ports[0];
-  failedPort.onMessage.fire({ type: "ready", version: 1 });
-  failedPort.onMessage.fire({ id: "323e4567-e89b-42d3-a456-426614174000", command: "status" });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(controller.isConnected(), false);
-  assert.equal(failedPort.disconnectCount, 1);
-  assert.equal(attributes.get("aria-checked"), "false");
-  assert.match(statusElement.textContent, /检查本地连接组件/);
+      let cleared;
+      listener({
+        type: "weixin-channels-video:offscreen-clear-pairing",
+        sessionId,
+      }, workerSender, (value) => { cleared = value; });
+      assert.deepEqual(cleared, { ok: true });
+      assert.deepEqual(removed, ["weixin-channels-video:bridge-session"]);
+      assert.equal(legacySession, null);
 
-  click();
-  assert.equal(controller.isConnected(), true);
-  assert.equal(ports.length, 2);
-});
-
-
-test("unpaired pages never launch the native host", () => {
-  let launches = 0;
-  const statusElement = { textContent: "" };
-  const chromeApi = { runtime: { connectNative: () => { launches += 1; } } };
-  for (const sessionId of [undefined, "not-a-session"]) {
-    const controller = createAgentConnectionController({ chromeApi, sessionId, statusElement });
-    controller.connect();
-    assert.equal(controller.isConnected(), false);
-    assert.match(statusElement.textContent, /首次连接/);
+      const request = {
+        type: "weixin-channels-video:offscreen-parse",
+        body: JSON.stringify({ type: "video_channel_url" }),
+      };
+      assert.equal(listener(request, {
+        id: extensionId,
+        url: "chrome-extension://" + extensionId + "/index.html",
+        frameId: 0,
+        documentId: "synthetic-page-document",
+      }, () => assert.fail("page messages cannot start background Yuanbao requests")), undefined);
+      const responsePromise = new Promise((resolve) => {
+        assert.equal(listener(request, workerSender, resolve), true);
+      });
+      const [{ message }] = harness.requestMessages;
+      harness.dispatchMessage({
+        type: "weixin-channels-video:api-response",
+        requestId: message.requestId,
+        status: 200,
+        body: "{\"code\":0}",
+      });
+      assert.deepEqual(await responsePromise, { status: 200, body: "{\"code\":0}" });
+    });
+  } finally {
+    if (previousChrome) Object.defineProperty(globalThis, "chrome", previousChrome);
+    else delete globalThis.chrome;
   }
-  assert.equal(launches, 0);
 });
 
-test("CLI pairing reuses a user page without starting a second native host", async () => {
+test("one reconnect alarm uses bounded backoff and stops after five failed starts", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  await withBackgroundHarness({
+    initialStorage: { "weixin-channels-video:bridge-session": sessionId },
+  }, async ({ onStartup, onAlarm, alarms, ports, storage }) => {
+    await onStartup.fire();
+    const expectedDelays = [1, 2, 4, 8, 15];
+    for (const expectedDelay of expectedDelays) {
+      const current = ports.at(-1);
+      await current.onDisconnect.fire();
+      assert.deepEqual([...alarms.keys()], ["weixin-channels-video:bridge-reconnect"]);
+      assert.deepEqual(alarms.get("weixin-channels-video:bridge-reconnect"), { delayInMinutes: expectedDelay });
+      alarms.delete("weixin-channels-video:bridge-reconnect");
+      await onAlarm.fire({ name: "weixin-channels-video:bridge-reconnect" });
+      assert.equal(ports.length, expectedDelays.indexOf(expectedDelay) + 2);
+    }
+    await ports.at(-1).onDisconnect.fire();
+    assert.equal(storage.get("weixin-channels-video:bridge-retry-count"), 5);
+    assert.equal(alarms.size, 0, "failed retries stop until startup or another explicit pairing");
+  });
+});
+
+test("Native Messaging commands share one queue across port reconnections", async () => {
+  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+  let startFirstOffscreenRequest;
+  let finishFirstOffscreenRequest;
+  const firstRequestStarted = new Promise((resolve) => { startFirstOffscreenRequest = resolve; });
+  const firstRequestResult = new Promise((resolve) => { finishFirstOffscreenRequest = resolve; });
+  let parseRequests = 0;
+  await withBackgroundHarness({
+    initialStorage: { "weixin-channels-video:bridge-session": sessionId },
+    fetchImpl: async (url) => {
+      if (url === API_URLS.userInfo) {
+        return Response.json({ userId: "user", needRefreshToken: false, anonUser: { isAnon: false } });
+      }
+      assert.fail("unexpected upstream URL");
+    },
+    offscreenMessenger: async (message) => {
+      assert.equal(message.type, "weixin-channels-video:offscreen-parse");
+      parseRequests += 1;
+      if (parseRequests === 1) {
+        startFirstOffscreenRequest();
+        return firstRequestResult;
+      }
+      return { status: 500, body: "{}" };
+    },
+  }, async ({ onStartup, onAlarm, ports }) => {
+    await onStartup.fire();
+    const oldPort = ports[0];
+    await oldPort.onMessage.fire({ type: "ready", version: 1 });
+    await oldPort.onMessage.fire({
+      id: "323e4567-e89b-42d3-a456-426614174000",
+      command: "parse",
+      url: "https://weixin.qq.com/sph/first",
+    });
+    await firstRequestStarted;
+    await oldPort.onMessage.fire({
+      id: "423e4567-e89b-42d3-a456-426614174000",
+      command: "parse",
+      url: "https://weixin.qq.com/sph/queued-old-request",
+    });
+
+    await oldPort.onDisconnect.fire();
+    await onAlarm.fire({ name: "weixin-channels-video:bridge-reconnect" });
+    const newPort = ports[1];
+    await newPort.onMessage.fire({ type: "ready", version: 1 });
+    await newPort.onMessage.fire({
+      id: "523e4567-e89b-42d3-a456-426614174000",
+      command: "parse",
+      url: "https://weixin.qq.com/sph/new-port-request",
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(parseRequests, 1, "new-port work waits for the dispatched old task");
+
+    finishFirstOffscreenRequest({ status: 500, body: "{}" });
+    for (let attempt = 0; attempt < 20 && newPort.messages.length < 2; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(parseRequests, 2, "queued work from the stale port is not replayed");
+    assert.equal(oldPort.messages.length, 1, "the stale port receives no late result");
+    assert.equal(newPort.messages.length, 2);
+  });
+});
+
+test("CLI bootstrap page sends only the fixed pairing and closes after background acknowledgment", async () => {
   const sessionId = "123e4567-e89b-42d3-a456-426614174000";
   const url = "chrome-extension://synthetic-id/index.html";
-  const stored = new Map([["unrelated", "preserve"]]);
-  const attributes = new Map();
-  const statusElement = {};
-  const toggleButton = { addEventListener() {}, setAttribute: (key, value) => attributes.set(key, value) };
-  const callbacks = new Map();
+  const messages = [];
   const calls = [];
-  let nativeStarts = 0;
-  const windowApi = {
-    location: { hash: `#agent-connect=${sessionId}` },
-    history: { replaceState(_state, _title, value) { calls.push(["clean", value]); windowApi.location.hash = ""; } },
-    localStorage: { setItem: (key, value) => stored.set(key, value), getItem: (key) => stored.get(key) },
-    addEventListener: (type, handler) => callbacks.set(type, handler),
-  };
-  const chromeApi = {
-    runtime: {
-      getURL: () => url,
-      getContexts: async () => [{ tabId: 1, windowId: 5 }, { tabId: 2, windowId: 6 }],
-      connectNative: () => { nativeStarts += 1; throw new Error("must not start before handoff"); },
-    },
-    tabs: {
-      getCurrent: async () => ({ id: 2 }),
-      update: async (id, options) => calls.push(["update", id, options]),
-      remove: async (id) => calls.push(["remove", id]),
-    },
-    windows: { update: async (id, options) => calls.push(["focus", id, options]) },
-  };
-  await startAgent({ chromeApi, windowApi, documentApi: { querySelector: (selector) => selector.endsWith("toggle") ? toggleButton : statusElement } });
-  assert.deepEqual(calls, [
-    ["clean", url],
-    ["update", 1, { url: `${url}#agent-connect=${sessionId}`, active: true }],
-    ["focus", 5, { focused: true }],
-    ["remove", 2],
-  ]);
-  assert.equal(nativeStarts, 0);
-  assert.equal(stored.get("unrelated"), "preserve");
-  assert.equal(stored.get("weixin-channels-video:bridge-session"), sessionId);
-});
-
-test("existing user page accepts pairing without reload and reads it on subsequent toggles", async () => {
-  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
-  const storage = new Map();
   const listeners = new Map();
-  const attributes = new Map();
-  let click;
-  const toggleButton = {
-    addEventListener(_type, callback) { click = callback; },
-    setAttribute: (key, value) => attributes.set(key, value),
-    getAttribute: (key) => attributes.get(key),
-  };
-  const statusElement = {};
-  const hellos = [];
   const windowApi = {
-    location: { hash: "#ordinary-fragment" },
-    history: { replaceState() { windowApi.location.hash = ""; } },
-    localStorage: { setItem: (key, value) => storage.set(key, value), getItem: (key) => storage.get(key) },
+    location: { hash: "#agent-connect=" + sessionId },
+    history: {
+      state: null,
+      replaceState(_state, _title, value) {
+        calls.push(["clean", value]);
+        windowApi.location.hash = "";
+      },
+    },
     addEventListener: (type, callback) => listeners.set(type, callback),
   };
   const chromeApi = {
     runtime: {
-      getURL: () => "chrome-extension://synthetic-id/index.html",
-      connectNative: () => ({
-        onMessage: { addListener() {} }, onDisconnect: { addListener() {} },
-        postMessage: (value) => hellos.push(value), disconnect() {},
-      }),
+      getURL: (path) => "chrome-extension://synthetic-id/" + path,
+      sendMessage: async (message) => {
+        messages.push(message);
+        return { ok: true };
+      },
+    },
+    tabs: {
+      getCurrent: async () => ({ id: 42 }),
+      remove: async (id) => calls.push(["remove", id]),
     },
   };
-  const controller = await startAgent({ chromeApi, windowApi, documentApi: { querySelector: (selector) => selector.endsWith("toggle") ? toggleButton : statusElement } });
-  assert.equal(controller.isConnected(), false);
-  assert.equal(storage.size, 0);
-  windowApi.location.hash = `#agent-connect=${sessionId}`;
-  listeners.get("hashchange")();
-  assert.equal(controller.isConnected(), true);
+
+  startAgent({ chromeApi, windowApi });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(messages, [{ type: "weixin-channels-video:pair", sessionId }]);
+  assert.deepEqual(calls, [["clean", url], ["remove", 42]]);
   assert.equal(windowApi.location.hash, "");
-  windowApi.location.hash = `#agent-connect=${sessionId}`;
-  listeners.get("hashchange")();
-  assert.equal(hellos.length, 1, "repeated pairing reuses the live native port");
-  click();
-  click();
-  assert.deepEqual(hellos, Array(2).fill({ type: "hello", version: 1, sessionId }));
+  assert.equal(typeof listeners.get("hashchange"), "function");
 });
 
-test("concurrent CLI pages choose one winner and never close each other", async () => {
-  const sessionId = "123e4567-e89b-42d3-a456-426614174000";
-  const url = "chrome-extension://synthetic-id/index.html";
-  const removed = [];
-  const updated = [];
-  const started = [];
-  const contexts = [{ tabId: 7, windowId: 1 }, { tabId: 8, windowId: 1 }];
-  await Promise.all(contexts.map(async ({ tabId }) => {
-    const storage = new Map();
-    const windowApi = {
-      location: { hash: `#agent-connect=${sessionId}` },
-      history: { replaceState() { windowApi.location.hash = ""; } },
-      localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) },
-      addEventListener() {},
-    };
-    await startAgent({
-      windowApi,
-      documentApi: { querySelector: () => ({ setAttribute() {}, addEventListener() {} }) },
-      chromeApi: {
-        runtime: {
-          getURL: () => url,
-          getContexts: async () => contexts,
-          connectNative: () => {
-            started.push(tabId);
-            return { onMessage: { addListener() {} }, onDisconnect: { addListener() {} }, postMessage() {}, disconnect() {} };
-          },
-        },
-        tabs: {
-          getCurrent: async () => ({ id: tabId }),
-          update: async (id) => updated.push(id),
-          remove: async (id) => removed.push(id),
-        },
-        windows: { update: async () => {} },
-      },
-    });
-  }));
-  assert.deepEqual(started, [7]);
-  assert.deepEqual(updated, [7]);
-  assert.deepEqual(removed, [8]);
-});
+test("manual extension page stays open and invalid pairing hashes are removed without pairing", async () => {
+  let sends = 0;
+  let removes = 0;
+  let hashChange;
+  const windowApi = {
+    location: { hash: "" },
+    history: { replaceState() { windowApi.location.hash = ""; } },
+    addEventListener(type, callback) { assert.equal(type, "hashchange"); hashChange = callback; },
+  };
+  const chromeApi = {
+    runtime: {
+      getURL: () => "chrome-extension://synthetic-id/index.html",
+      sendMessage: async () => { sends += 1; return { ok: true }; },
+    },
+    tabs: {
+      getCurrent: async () => ({ id: 1 }),
+      remove: async () => { removes += 1; },
+    },
+  };
+  startAgent({ chromeApi, windowApi });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sends, 0);
+  assert.equal(removes, 0);
 
-test("pairing storage failure closes an existing connection before reporting off", () => {
-  for (const brokenRead of [() => undefined, () => { throw new Error("blocked storage"); }]) {
-    let readSession = () => "123e4567-e89b-42d3-a456-426614174000";
-    let disconnects = 0;
-    const controller = createAgentConnectionController({
-      readSession: () => readSession(),
-      chromeApi: { runtime: { connectNative: () => ({
-        onMessage: { addListener() {} }, onDisconnect: { addListener() {} },
-        postMessage() {}, disconnect() { disconnects += 1; },
-      }) } },
-    });
-    controller.connect();
-    assert.equal(controller.isConnected(), true);
-    readSession = brokenRead;
-    controller.connect();
-    assert.equal(controller.isConnected(), false);
-    assert.equal(disconnects, 1);
-  }
+  windowApi.location.hash = "#agent-connect=not-a-session";
+  hashChange();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sends, 0);
+  assert.equal(removes, 0);
+  assert.equal(windowApi.location.hash, "");
 });

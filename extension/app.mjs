@@ -23,7 +23,7 @@ function responseFromRequestResult(result) {
   });
 }
 
-function requestParseShareInHiddenIframe(
+export function requestParseShareInHiddenIframe(
   body,
   documentApi = globalThis.document,
   windowApi = globalThis.window,

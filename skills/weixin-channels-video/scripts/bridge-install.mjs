@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, constants, lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,9 +69,39 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+function readShellWord(text, offset) {
+  if (text[offset] !== "'") return null;
+  let value = "";
+  for (let index = offset + 1; index < text.length;) {
+    if (text.startsWith("'\\''", index)) {
+      value += "'";
+      index += 4;
+    } else if (text[index] === "'") {
+      return { value, next: index + 1 };
+    } else {
+      value += text[index];
+      index += 1;
+    }
+  }
+  return null;
+}
+
+function launcherNodeExecutable(text, hostPath, configPath) {
+  const prefix = "#!/bin/sh\nexec ";
+  if (!text.startsWith(prefix)) return null;
+  const node = readShellWord(text, prefix.length);
+  if (!node || text.slice(node.next) !== ` ${shellQuote(hostPath)} ${shellQuote(configPath)} "$@"\n`) return null;
+  return node.value;
+}
+
 function readJson(text, label) {
   try { return JSON.parse(text); }
   catch { throw new Error(`${label} is invalid.`); }
+}
+
+function isBridgeSession(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && value.version === 1 && SESSION_ID_PATTERN.test(value.sessionId);
 }
 
 function isOwnedManifest(value, launcherPath) {
@@ -192,7 +222,7 @@ export async function installBridge({
   if (sameConfiguration && existingSession !== undefined) {
     try {
       const previousSession = JSON.parse(existingSession);
-      if (previousSession?.version === 1 && SESSION_ID_PATTERN.test(previousSession.sessionId)) {
+      if (isBridgeSession(previousSession)) {
         sessionId = previousSession.sessionId;
       }
     } catch { /* Replace invalid owned session state with a fresh identifier. */ }
@@ -239,6 +269,87 @@ export async function readBridgeInstallation({ appSupportDir = defaultAppSupport
   return value;
 }
 
+async function fileStatus(path, { allowSymlink = false, executable = false } = {}) {
+  try {
+    const info = allowSymlink ? await stat(path) : await lstat(path);
+    if (!info.isFile() || (!allowSymlink && info.isSymbolicLink())) return { state: "invalid" };
+    if (executable) {
+      try { await access(path, constants.X_OK); }
+      catch { return { state: "invalid" }; }
+    }
+    return { state: "present", size: info.size };
+  } catch (error) {
+    return { state: error.code === "ENOENT" ? "missing" : "unknown" };
+  }
+}
+
+export async function inspectBridgeComponents(config, {
+  registryDir = config?.chromeUserDataDir
+    ? join(config.chromeUserDataDir, "NativeMessagingHosts")
+    : join(defaultChromeUserDataDir(), "NativeMessagingHosts"),
+} = {}) {
+  if (!config) {
+    return {
+      registration: "unknown",
+      host: "unknown",
+      launcher: "unknown",
+      node: "unknown",
+      session: "unknown",
+    };
+  }
+  const hostPath = join(config.appSupportDir, "native-host.mjs");
+  const configPath = join(config.appSupportDir, "bridge.json");
+  const launcherPath = join(config.appSupportDir, "native-host-launcher");
+  const manifestPath = join(registryDir, `${NATIVE_HOST_NAME}.json`);
+  const hostFile = await fileStatus(hostPath);
+  const launcherFile = await fileStatus(launcherPath, { executable: true });
+  const host = hostFile.state === "present"
+    ? hostFile.size > 0 ? "present" : "invalid"
+    : hostFile.state;
+  let launcher = launcherFile.state === "present" ? "valid" : launcherFile.state;
+  let node = "unknown";
+  if (launcherFile.state === "present") {
+    try {
+      const text = await readFile(launcherPath, "utf8");
+      const nodePath = launcherNodeExecutable(text, hostPath, configPath);
+      if (!nodePath || !nodePath.startsWith("/")) {
+        launcher = "invalid";
+      } else {
+        const nodeFile = await fileStatus(nodePath, { allowSymlink: true, executable: true });
+        node = nodeFile.state === "present" ? "available" : nodeFile.state;
+        if (node === "missing" || node === "invalid") launcher = "invalid";
+        else if (node === "unknown") launcher = "unknown";
+      }
+    } catch (error) {
+      launcher = error.code === "ENOENT" ? "missing" : "unknown";
+    }
+  }
+
+  let registration = "unknown";
+  try {
+    const text = await inspectExisting(manifestPath);
+    if (text === undefined) registration = "missing";
+    else {
+      const manifest = readJson(text, "Native Messaging registration");
+      registration = isOwnedManifest(manifest, launcherPath) &&
+        manifest.allowed_origins[0] === `chrome-extension://${config.extensionId}/`
+        ? "valid"
+        : "invalid";
+    }
+  } catch (error) {
+    registration = error.code === "ENOENT" ? "missing" : error.code ? "unknown" : "invalid";
+  }
+
+  let session = "unknown";
+  try {
+    const value = JSON.parse(await readFile(join(config.appSupportDir, "session.json"), "utf8"));
+    session = isBridgeSession(value) ? "available" : "invalid";
+  } catch (error) {
+    session = error.code === "ENOENT" ? "missing" : error.code ? "unknown" : "invalid";
+  }
+  return { registration, host, launcher, node, session };
+}
+
 export function bridgeSocketPath(config, sessionId) {
   if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error("Bridge session is invalid.");
   return join(config.appSupportDir, `s-${sessionId.replaceAll("-", "").slice(0, 16)}.sock`);
@@ -247,7 +358,7 @@ export function bridgeSocketPath(config, sessionId) {
 export async function readBridgeSession(config) {
   try {
     const session = JSON.parse(await readFile(join(config.appSupportDir, "session.json"), "utf8"));
-    if (session?.version !== 1 || !SESSION_ID_PATTERN.test(session.sessionId)) return null;
+    if (!isBridgeSession(session)) return null;
     return session.sessionId;
   } catch {
     return null;

@@ -51,7 +51,7 @@ Agent → Skill CLI → 本地桥接 → Chrome 扩展 → 解析与下载
 
 Skill 不操作元宝或视频号页面，不读取 Chrome Cookie 数据库，不需要 Python、`Chrome Safe Storage` 钥匙串授权、Docker、远程解析服务或 Codex Chrome 插件。运行要求是 macOS、本机 Chrome 和 Node.js 24+；需要 Chrome 116+，扩展所在 profile 已登录元宝。
 
-首次使用时，Agent 检测已有安装和连接。缺少插件或桥接时，说明来源、站点访问与下载权限，以及新增的 `nativeMessaging` 权限，取得用户授权后协助安装：
+首次使用时，Agent 检测已有安装和连接。缺少插件或桥接时，说明来源、站点访问、下载与本地通信权限，以及保存配对、后台解析与重连所需权限，取得用户授权后协助安装：
 
 1. 将独立 Skill 包放在宿主的技能目录。
 2. 在选定 Chrome profile 中加载包内的 `assets/extension/`，或复用已经安装的本项目扩展。开发阶段通过 `chrome://extensions` 的“开发者模式 → 加载已解压的扩展程序”安装；Agent 有桌面操作能力时可代操作，否则提供目录和步骤。
@@ -68,6 +68,7 @@ node scripts/cli.mjs install-bridge \
   --extension-id '替换为扩展ID' --profile 'Chrome 中的 profile 名称或目录名'
 node scripts/cli.mjs connect
 node scripts/cli.mjs status
+node scripts/cli.mjs diagnose
 node scripts/cli.mjs parse --url 'https://weixin.qq.com/sph/你的分享链接'
 node scripts/cli.mjs download --url 'https://weixin.qq.com/sph/你的分享链接' \
   --filename '视频.mp4'
@@ -75,9 +76,22 @@ node scripts/cli.mjs download --url 'https://weixin.qq.com/sph/你的分享链�
 
 `install-bridge` 注册 Chrome 用户级 Native Messaging host 和本工具的私有配置，不修改 Chrome profile 设置或读取 Cookie。桥接目录权限为 `0700`，配置与本地 Unix socket 为 `0600`，host 仅接受已登记的扩展 ID。桥接传递固定任务和结果，不提供任意网址请求或 JavaScript 执行接口。
 
-在插件主页面的“连接 AI 助手”区域点击开关，即可开启、关闭和重新开启连接，无需手动运行命令。默认关闭，手动解析与下载可以照常使用；首次尚未配置时，让 AI 助手协助安装本地连接组件并初始化此 profile 的连接。配对保存在该 profile 的插件内，其他 profile 不能直接使用这份连接。使用 AI 时保留主页面，关闭或刷新页面会断开连接。关闭连接不会取消已接收的任务或已开始的下载。
+首次授权、安装和配对完成后，扩展后台自动连接本地桥接。Chrome 启动、扩展重载或连接中断后按受控退避恢复连接。配对保存在所选 profile 内，其他 profile 不能直接使用这份连接；旧页面 localStorage 配对自动迁移。页面没有 AI 连接开关，关闭、刷新或不打开插件主页均可通过 Skill 解析与下载。手动解析与下载继续独立可用。
 
-`connect` 复用已有连接；未连接时在所选 profile 中打开插件主页面并自动开启连接。Chrome 由此启动本地桥接，无需单独的连接页面、元宝或视频号标签页。`status` 区分未安装、未连接、已登录、未登录与登录检查失败；网络或响应异常不会被当作未登录。
+`connect` 复用已有连接；Chrome 未运行时后台启动所选 profile 的正常 Chrome，等待扩展后台连通。首次或修复配对时可能短暂打开初始化页，配对保存后该页自行关闭，无需保留元宝、视频号或插件标签页。`parse` / `download` 在提交任务前恢复连接，提交之后不会因超时或断连自动重发，以免重复下载。`status` 报告桥接配置、连接与登录状态；网络或响应异常不会被当作未登录。
+
+`diagnose` 只读检查 Chrome 安装、版本、运行状态、所选 profile、扩展记录、Native Messaging 注册和桥接文件、配对及通信状态，返回结构化状态和下一步建议。未确定的原因保留为 `unknown`；`recorded_unknown` 表示已有扩展记录但无法确认启用状态。扩展记录缺失还可能是 ID 不匹配，不能单凭通信超时认定未安装。
+
+| 检查结果 | Skill 的应对 |
+| --- | --- |
+| Chrome 未安装或版本不足 | 提供官方安装/更新指引，取得授权后协助；启动失败另行报告原因。 |
+| Chrome 未运行 | 直接启动已选 profile 并等待通信，不把进程启动当作连接成功。 |
+| profile 或扩展状态不确定 | 核实选定 profile、扩展来源、ID 和启用状态；用户禁用的扩展由用户决定是否恢复。 |
+| 确认扩展缺失 | 说明权限、取得授权后加载包内扩展；失败时给出实际目录和完整手动步骤。 |
+| 桥接缺失、过期或配对不匹配 | 复用有效安装，在已有授权范围内修复；无法确定时报告检查结果及下一步。 |
+| 已连接但登录失效或检查失败 | 在同一 profile 登录，或按检查错误处理；不通过重装 Chrome/扩展解决。 |
+
+安装失败或没有桌面代操作能力时，Skill 的手动指引包含 `assets/extension/` 实际绝对目录、所选 profile、`chrome://extensions` 的开发者模式与加载步骤、扩展 ID、桥接注册命令和连接验证。已有且仍有效的安装授权不重复询问。
 
 `download` 默认使用共享核心选定的视频版本，`--filename` 指定 Chrome 下载目录内的相对文件名，省略时由标题生成。保存位置与位置选择遵循 Chrome 下载设置，重名时自动改名；命令等待 Chrome 报告下载完成后返回最终文件路径与字节数，中断或超时返回错误。它不支持任意绝对输出路径。
 
@@ -162,11 +176,11 @@ curl --fail-with-body http://localhost:3000/parse \
 
 扩展直接复用浏览器会话，在本地完成解析，通过 Chrome 下载能力保存文件。无需本地后台服务，也无需部署 Worker 或 Docker。
 
-解析时无需打开元宝或视频号上游标签页。元宝解析仍使用隐藏 iframe 和浏览器会话；浏览器按 iframe 的 SameSite 与第三方 Cookie 策略决定是否携带元宝 Cookie。受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。
+解析时无需打开元宝或视频号上游标签页。手动页面解析使用隐藏 iframe，Skill 后台解析由 offscreen 文档中的同一 iframe 请求实现承接；登录态仍由浏览器持有。浏览器按 iframe 的 SameSite 与第三方 Cookie 策略决定是否携带元宝 Cookie。受控 Chrome 测试中，未分区的 HttpOnly `SameSite=None` Cookie 随请求发送，未分区的 HttpOnly `SameSite=Strict` Cookie 未发送，因此不能保证依赖后者的登录态可用。
 
-视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；验证消息只接受扩展自己的 `index.html` 页面，并核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 116+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。实际 Chrome 扩展解析、预览与下载验收见 [产品目标 #10](https://github.com/MC0571/weixin-channels-video/issues/10)，Skill CLI 与 Native Messaging 下载验收见 [产品目标 #4](https://github.com/MC0571/weixin-channels-video/issues/4)。
+视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；页面消息只接受扩展自己的 `index.html`，后台 Skill 任务复用同一请求校验，核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 116+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。实际 Chrome 扩展解析、预览与下载验收见 [产品目标 #10](https://github.com/MC0571/weixin-channels-video/issues/10)，Skill CLI 与 Native Messaging 下载验收见 [产品目标 #4](https://github.com/MC0571/weixin-channels-video/issues/4)。
 
-扩展申请下载、`declarativeNetRequestWithHostAccess`、与本地桥接通信的 `nativeMessaging` 及访问两个上游站点所需的 host permissions。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+扩展申请下载、`declarativeNetRequestWithHostAccess`、与本地桥接通信的 `nativeMessaging` 及访问两个上游站点所需的 host permissions。后台连接使用 `storage` 保存配对、`offscreen` 承接隐藏 iframe 和旧配对迁移、`alarms` 安排受控重连；升级时核对这些权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
 扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 

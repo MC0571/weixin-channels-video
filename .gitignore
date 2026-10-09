@@ -3,6 +3,7 @@ dist/
 extension/app.js
 extension/background.js
 extension/agent.js
+extension/offscreen.js
 .wrangler/
 .venv/
 __pycache__/
