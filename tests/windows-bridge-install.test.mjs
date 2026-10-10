@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { BridgeSetupError, installBridge, inspectBridgeComponents } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
@@ -10,6 +10,86 @@ import { NATIVE_HOST_NAME } from "../src/native-messaging.mjs";
 
 const extensionId = "a".repeat(32);
 const nativeHostSource = fileURLToPath(new URL("../src/native-host.mjs", import.meta.url));
+const launcherTimeoutMs = 15_000;
+
+function fixedError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function waitForClose(child, category) {
+  return new Promise((resolve, reject) => {
+    child.once("error", () => reject(fixedError(category)));
+    child.once("close", (status, signal) => resolve({ status, signal }));
+  });
+}
+
+async function waitAtMost(promise, durationMs) {
+  let timeout;
+  const result = await Promise.race([
+    promise,
+    new Promise((resolve) => { timeout = setTimeout(() => resolve(null), durationMs); }),
+  ]);
+  clearTimeout(timeout);
+  return result;
+}
+
+async function runWindowsLauncher(invocation, { input, env }) {
+  const child = spawn("cmd.exe", ["/d", "/s", "/c", invocation], {
+    env,
+    shell: false,
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const stdout = [];
+  const stderr = [];
+  let stdinFailed = false;
+  child.stdout.on("data", (chunk) => stdout.push(chunk));
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  child.stdin.on("error", () => { stdinFailed = true; });
+  const closePromise = waitForClose(child, "WINDOWS_LAUNCHER_SPAWN_FAILED");
+  child.stdin.end(input);
+
+  const result = await waitAtMost(closePromise, launcherTimeoutMs);
+  if (result) {
+    if (stdinFailed) throw fixedError("WINDOWS_LAUNCHER_STDIN_FAILED");
+    return { ...result, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) };
+  }
+
+  const pid = child.pid;
+  if (!Number.isSafeInteger(pid)) throw fixedError("WINDOWS_LAUNCHER_TIMEOUT_NO_PID");
+  const systemRoot = process.env.SystemRoot || "C:\\Windows";
+  const taskkill = spawn(join(systemRoot, "System32", "taskkill.exe"), ["/PID", String(pid), "/T", "/F"], {
+    shell: false,
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  let taskkillClose;
+  try {
+    taskkillClose = await waitAtMost(
+      waitForClose(taskkill, "WINDOWS_TREE_CLEANUP_FAILED"),
+      5_000,
+    );
+  } catch {
+    taskkillClose = null;
+  }
+  if (!taskkillClose) taskkill.kill();
+  let childClose = await waitAtMost(
+    closePromise,
+    5_000,
+  );
+  if (!childClose) {
+    child.kill();
+    childClose = await waitAtMost(closePromise, 5_000);
+  }
+  if (!childClose) throw fixedError("WINDOWS_TREE_CLEANUP_TIMEOUT");
+  if (!taskkillClose || taskkillClose.status !== 0) {
+    throw fixedError("WINDOWS_TREE_CLEANUP_FAILED");
+  }
+  throw fixedError("WINDOWS_LAUNCHER_TIMEOUT");
+}
 
 async function withTempDir(callback) {
   const root = await mkdtemp(join(tmpdir(), "wcv-win-bridge-"));
@@ -337,16 +417,11 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
       const invocation = argument
         ? `""${manifest.path}" ${origin} ${argument}"`
         : `""${manifest.path}" ${origin}"`;
-      const child = spawnSync("cmd.exe", ["/d", "/s", "/c", invocation], {
+      const child = await runWindowsLauncher(invocation, {
         input,
-        encoding: null,
-        windowsHide: true,
-        windowsVerbatimArguments: true,
-        timeout: 15_000,
         env: { ...process.env, WCV_CAPTURE: capturePath },
       });
-      assert.equal(child.error, undefined, child.error?.message);
-      assert.equal(child.status, 0, child.stderr?.toString("utf8"));
+      assert.equal(child.status, 0, "WINDOWS_LAUNCHER_EXITED_NONZERO");
       assert.deepEqual(child.stdout, input);
       assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
         config.configPath,
@@ -397,16 +472,11 @@ test("Windows launcher passes the canonical long config path when Chrome uses th
     assert.doesNotMatch(manifest.path, /!/);
     const origin = `chrome-extension://${extensionId}/`;
     const input = Buffer.from([0x00, 0x02, 0x7b, 0xff, 0x00, 0x0d, 0x0a]);
-    const child = spawnSync("cmd.exe", ["/d", "/s", "/c", `""${manifest.path}" ${origin} --parent-window=12345"`], {
+    const child = await runWindowsLauncher(`""${manifest.path}" ${origin} --parent-window=12345"`, {
       input,
-      encoding: null,
-      windowsHide: true,
-      windowsVerbatimArguments: true,
-      timeout: 15_000,
       env: { ...process.env, WCV_CAPTURE: capturePath },
     });
-    assert.equal(child.error, undefined, child.error?.message);
-    assert.equal(child.status, 0, child.stderr?.toString("utf8"));
+    assert.equal(child.status, 0, "WINDOWS_LAUNCHER_EXITED_NONZERO");
     assert.deepEqual(child.stdout, input);
     assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
       config.configPath,
