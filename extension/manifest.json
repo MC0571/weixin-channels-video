@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "视频号分享链接解析",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "在本地解析视频号分享链接并下载视频。",
   "icons": {
     "16": "icons/icon16.png",
