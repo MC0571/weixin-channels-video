@@ -195,6 +195,7 @@ async function requestThroughNativeHost(fixture, input, frames) {
 }
 
 async function smokeLiveHostTimeoutRecovery(fixture, partial) {
+  const scenario = partial ? "live-timeout-partial" : "live-timeout-empty";
   const input = new PassThrough();
   const output = new PassThrough();
   const frames = createFrameReader(output);
@@ -206,10 +207,15 @@ async function smokeLiveHostTimeoutRecovery(fixture, partial) {
   });
   try {
     input.write(Buffer.from(encodeBridgeFrame({ type: "hello", version: 1, sessionId })));
+    failureStage = `${scenario}-pipe-startup`;
+    await host.windowsTransport.ready;
+    failureStage = `${scenario}-native-ready-frame`;
     assert.deepEqual(await frames.next(), { type: "ready", version: 1 });
+    failureStage = `${scenario}-idle-client-recovery`;
     const client = await openPipeClient(fixture.socketPath, partial);
     await new Promise((resolve) => setTimeout(resolve, 5_500));
     await expectPipeClientClosed(client);
+    failureStage = `${scenario}-request-after-timeout`;
     await requestThroughNativeHost(fixture, input, frames);
   } finally {
     await host.close();
