@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,19 @@ const extensionId = "a".repeat(32);
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
 const ipcSecret = "a".repeat(64);
 const hostScript = fileURLToPath(new URL("../src/native-host.mjs", import.meta.url));
+const SAFE_FAILURE_CODES = new Set([
+  "ERR_ASSERTION", "ERR_STREAM_WRITE_AFTER_END",
+  "EACCES", "EADDRINUSE", "ECONNREFUSED", "ECONNRESET", "ENOENT", "EPIPE", "EPERM", "ETIMEDOUT",
+  "BRIDGE_DISCONNECTED", "BRIDGE_TIMEOUT", "NATIVE_HOST_CLOSED", "NATIVE_HOST_TIMEOUT", "PIPE_OWNER_START_FAILED",
+  "WINDOWS_PIPE_CLOSED", "WINDOWS_PIPE_FAILED", "WINDOWS_PIPE_PROTOCOL_ERROR", "WINDOWS_PIPE_START_FAILED",
+  "WINDOWS_PIPE_START_TIMEOUT", "WINDOWS_PIPE_UNAVAILABLE",
+]);
+let failureStage = "fixture";
+
+function safeFailureCode(error) {
+  const code = error?.code ?? error?.message;
+  return SAFE_FAILURE_CODES.has(code) ? code : "UNCLASSIFIED";
+}
 
 function createFrameReader(stream) {
   const decoder = new BridgeFrameDecoder();
@@ -289,13 +302,25 @@ async function smokeAbruptHostExit(fixture, partial) {
 async function main() {
   const root = await mkdtemp(join(tmpdir(), "wcv-native-ipc-smoke-"));
   try {
+    failureStage = "pipe-command-contract";
+    const nativeIpcSource = await readFile(new URL("../src/native-ipc.mjs", import.meta.url), "utf8");
+    assert.match(nativeIpcSource, /^\s*\[void\]\$accept\.GetAwaiter\(\)\.GetResult\(\)\s*$/m);
+
+    failureStage = "fixture";
     const fixture = await createFixture(root);
+    failureStage = "pipe-preemption";
     await smokePipePreemption(fixture);
+    failureStage = "live-timeout-empty-client";
     await smokeLiveHostTimeoutRecovery(fixture, false);
+    failureStage = "live-timeout-partial-client";
     await smokeLiveHostTimeoutRecovery(fixture, true);
+    failureStage = "authenticated-idle-timeout";
     await smokeAuthenticatedIdleTimeoutRecovery(fixture);
+    failureStage = "abrupt-exit-empty-client";
     await smokeAbruptHostExit(fixture, false);
+    failureStage = "abrupt-exit-partial-client";
     await smokeAbruptHostExit(fixture, true);
+    failureStage = "cleanup";
     process.stdout.write("Windows native IPC smoke passed.\n");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -305,8 +330,8 @@ async function main() {
 if (process.platform !== "win32") {
   process.stdout.write("Windows native IPC smoke skipped (requires Windows).\n");
 } else {
-  main().catch(() => {
-    process.stderr.write("Windows native IPC smoke failed.\n");
+  main().catch((error) => {
+    process.stderr.write(`Windows native IPC smoke failed: stage=${failureStage} code=${safeFailureCode(error)}.\n`);
     process.exitCode = 1;
   });
 }

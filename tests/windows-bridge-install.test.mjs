@@ -201,6 +201,7 @@ test("Windows bridge install keeps Unicode and spaces in long paths and stages f
     assert.match(launcher, /--parent-window=/);
     assert.match(launcher, /\$process\.RedirectStandardError=\$true/);
     assert.match(launcher, /\$child\.StandardError\.BaseStream\.CopyToAsync\(\[Console\]::OpenStandardError\(\)\)/);
+    assert.match(launcher, /\[void\]\$errorCopy\.GetAwaiter\(\)\.GetResult\(\)/);
     assert.doesNotMatch(launcher, /RedirectStandardInput|RedirectStandardOutput/);
     assert.match(launcher, /WCV_PARENT_WINDOW=%~2/);
     assert.match(launcher, /WCV_PARENT_WINDOW_VALUE=%~3/);

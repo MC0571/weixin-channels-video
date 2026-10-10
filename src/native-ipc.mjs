@@ -74,7 +74,7 @@ try {
         $processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)
       }
     }
-    $accept.GetAwaiter().GetResult()
+    [void]$accept.GetAwaiter().GetResult()
     Write-Transport-Marker $processOutput 0
     $pipeBuffer.Clear()
     $connected = $true
