@@ -29,63 +29,10 @@ const SAFE_FAILURE_CODES = new Set([
 ]);
 let failureStage = "fixture";
 let failureChildExitCode;
-let failureProbeStage;
 
 function safeFailureCode(error) {
   const code = error?.code ?? error?.message;
   return SAFE_FAILURE_CODES.has(code) ? code : "UNCLASSIFIED";
-}
-
-function replaceUnique(source, token, replacement) {
-  const index = source.indexOf(token);
-  assert.notEqual(index, -1, `missing PowerShell probe token: ${token}`);
-  assert.equal(source.indexOf(token, index + token.length), -1, `repeated PowerShell probe token: ${token}`);
-  return source.replace(token, () => replacement);
-}
-
-function instrumentWindowsPipeCommand(command) {
-  let instrumented = replaceUnique(
-    command,
-    "$ErrorActionPreference = 'Stop'",
-    "$ErrorActionPreference = 'Stop'\n$wcvProbeStage = 0",
-  );
-  const stages = [
-    ["$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()", 1],
-    ["$pipeSecurity = New-Object System.IO.Pipes.PipeSecurity", 2],
-    ["$pipe = [System.IO.Pipes.NamedPipeServerStream]::new(", 3],
-    ["$actual = $pipe.GetAccessControl()", 4],
-    ["$processInput = [Console]::OpenStandardInput()", 5],
-    ["$processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)\n  $pipeReadBuffer", 6],
-    ["$accept = $pipe.WaitForConnectionAsync()", 7],
-  ];
-  for (const [token, stage] of stages) {
-    instrumented = replaceUnique(instrumented, token, `$wcvProbeStage = ${stage}\n  ${token}`);
-  }
-  instrumented = replaceUnique(
-    instrumented,
-    "} catch {\n  exit 1\n}\n",
-    "} catch {\n  [Console]::Error.WriteLine('WCV_STAGE_' + $wcvProbeStage)\n  [Console]::Error.Flush()\n  exit 1\n}\n",
-  );
-  return instrumented;
-}
-
-function createWindowsStartupProbeSpawnImpl() {
-  return (command, args, options) => {
-    assert.equal(args[2], "-Command");
-    assert.equal(typeof args[3], "string");
-    const child = spawn(command, [...args.slice(0, 3), instrumentWindowsPipeCommand(args[3])], options);
-    let stderrBuffer = "";
-    child.stderr.on("data", (chunk) => {
-      stderrBuffer = (stderrBuffer + chunk.toString("utf8")).slice(-64);
-      const lines = stderrBuffer.split(/\r?\n/);
-      stderrBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const match = /^WCV_STAGE_([0-7])$/.exec(line);
-        if (match) failureProbeStage = Number(match[1]);
-      }
-    });
-    return child;
-  };
 }
 
 function createFrameReader(stream) {
@@ -258,13 +205,11 @@ async function smokeLiveHostTimeoutRecovery(fixture, partial) {
     extensionOrigin: `chrome-extension://${extensionId}/`,
     input,
     output,
-    powershellSpawnImpl: createWindowsStartupProbeSpawnImpl(),
   });
   try {
     input.write(Buffer.from(encodeBridgeFrame({ type: "hello", version: 1, sessionId })));
     failureStage = `${scenario}-pipe-startup`;
     failureChildExitCode = undefined;
-    failureProbeStage = undefined;
     try {
       await host.windowsTransport.ready;
     } catch (error) {
@@ -374,6 +319,13 @@ async function main() {
     failureStage = "pipe-command-contract";
     const nativeIpcSource = await readFile(new URL("../src/native-ipc.mjs", import.meta.url), "utf8");
     assert.match(nativeIpcSource, /^\s*\[void\]\$accept\.GetAwaiter\(\)\.GetResult\(\)\s*$/m);
+    assert.match(nativeIpcSource, /TokenLogonSid\s*=\s*28/);
+    assert.match(nativeIpcSource, /SafeAccessTokenHandle tokenHandle/);
+    assert.match(nativeIpcSource, /Marshal\.AllocHGlobal/);
+    assert.match(nativeIpcSource, /Marshal\.FreeHGlobal\(buffer\)/);
+    assert.equal((nativeIpcSource.match(/WindowsTransport\]::ReadProcessInputAsync\(/g) ?? []).length, 4);
+    assert.match(nativeIpcSource, /Task\.Run<int>\(\(\) => stream\.Read\(buffer, 0, buffer\.Length\)\)/);
+    assert.doesNotMatch(nativeIpcSource, /\$identity\.Groups\b/);
 
     failureStage = "fixture";
     const fixture = await createFixture(root);
@@ -401,8 +353,7 @@ if (process.platform !== "win32") {
 } else {
   main().catch((error) => {
     const childExit = Number.isInteger(failureChildExitCode) ? ` childExitCode=${failureChildExitCode}` : "";
-    const probeStage = Number.isInteger(failureProbeStage) ? ` probeStage=${failureProbeStage}` : "";
-    process.stderr.write(`Windows native IPC smoke failed: stage=${failureStage} code=${safeFailureCode(error)}${childExit}${probeStage}.\n`);
+    process.stderr.write(`Windows native IPC smoke failed: stage=${failureStage} code=${safeFailureCode(error)}${childExit}.\n`);
     process.exitCode = 1;
   });
 }

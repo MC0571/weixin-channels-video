@@ -1,7 +1,10 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { MAX_BRIDGE_MESSAGE_BYTES, SESSION_ID_PATTERN } from "./native-messaging.mjs";
-import { windowsPowerShellPath } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
+import {
+  windowsPowerShellBuiltinModuleImport,
+  windowsPowerShellPath,
+} from "../skills/weixin-channels-video/scripts/windows-security.mjs";
 
 export const IPC_PROTOCOL = 2;
 export const IPC_AUTH_TIMEOUT_MS = 5_000;
@@ -13,24 +16,115 @@ const NONCE_PATTERN = /^[0-9a-f]{64}$/;
 const PROOF_DOMAIN = "weixin-channels-video\0native-ipc\0v2\0";
 const WINDOWS_PIPE_COMMAND = String.raw`
 $ErrorActionPreference = 'Stop'
+$wcvHelperSource = @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
+
+namespace WeixinChannelsVideo.NativeIpc
+{
+    public static class WindowsTransport
+    {
+        private const int TokenLogonSid = 28;
+        private const int ErrorInsufficientBuffer = 122;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SidAndAttributes
+        {
+            public IntPtr Sid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct TokenGroups
+        {
+            public uint GroupCount;
+            public SidAndAttributes FirstGroup;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            SafeAccessTokenHandle tokenHandle,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            uint tokenInformationLength,
+            out uint returnLength);
+
+        public static SecurityIdentifier GetLogonSid(SafeAccessTokenHandle tokenHandle)
+        {
+            if (tokenHandle == null || tokenHandle.IsInvalid || tokenHandle.IsClosed)
+                throw new InvalidOperationException();
+
+            uint requiredLength;
+            bool firstCall = GetTokenInformation(
+                tokenHandle, TokenLogonSid, IntPtr.Zero, 0, out requiredLength);
+            int firstError = Marshal.GetLastWin32Error();
+            if (firstCall || firstError != ErrorInsufficientBuffer ||
+                requiredLength == 0 || requiredLength > Int32.MaxValue)
+                throw new InvalidOperationException();
+
+            IntPtr buffer = Marshal.AllocHGlobal((int)requiredLength);
+            try
+            {
+                uint returnedLength;
+                if (!GetTokenInformation(
+                    tokenHandle, TokenLogonSid, buffer, requiredLength, out returnedLength))
+                    throw new InvalidOperationException();
+
+                int groupsOffset = Marshal.OffsetOf(typeof(TokenGroups), "FirstGroup").ToInt32();
+                int groupSize = Marshal.SizeOf(typeof(SidAndAttributes));
+                long minimumLength = (long)groupsOffset + groupSize;
+                if ((long)returnedLength < minimumLength || returnedLength > requiredLength)
+                    throw new InvalidOperationException();
+
+                TokenGroups groups = (TokenGroups)Marshal.PtrToStructure(
+                    buffer, typeof(TokenGroups));
+                if (groups.GroupCount != 1 || groups.FirstGroup.Sid == IntPtr.Zero)
+                    throw new InvalidOperationException();
+
+                return new SecurityIdentifier(groups.FirstGroup.Sid);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public static Task<int> ReadProcessInputAsync(Stream stream, byte[] buffer)
+        {
+            return Task.Run<int>(() => stream.Read(buffer, 0, buffer.Length));
+        }
+    }
+}
+'@
 function Write-Transport-Marker([System.IO.Stream]$stream, [uint32]$length) {
   $stream.Write([BitConverter]::GetBytes($length), 0, 4)
   $stream.Flush()
 }
 try {
+  try {
+    ${windowsPowerShellBuiltinModuleImport("Microsoft.PowerShell.Utility")}
+    [void](Add-Type -Language CSharp -TypeDefinition $wcvHelperSource -ErrorAction Stop -WarningAction Stop -InformationAction SilentlyContinue)
+  } catch { exit 1 }
+
   $pipeName = $env:WCV_IPC_PIPE_NAME
   if ($pipeName -notmatch '^weixin-channels-video-[0-9a-f]{32}$') { exit 2 }
   $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
   $userSid = $identity.User
-  $logonSids = @($identity.Groups | Where-Object { $_.Value -match '^S-1-5-5-\d+-\d+$' })
-  if ($null -eq $userSid -or $logonSids.Count -ne 1) { exit 3 }
+  if ($null -eq $userSid) { exit 3 }
+  try { $logonSid = [WeixinChannelsVideo.NativeIpc.WindowsTransport]::GetLogonSid($identity.AccessToken) }
+  catch { exit 6 }
 
   $pipeSecurity = New-Object System.IO.Pipes.PipeSecurity
   $pipeSecurity.SetAccessRuleProtection($true, $false)
   $pipeSecurity.SetOwner($userSid)
   $fullControl = [System.IO.Pipes.PipeAccessRights]::FullControl
   $allow = [System.Security.AccessControl.AccessControlType]::Allow
-  $pipeSecurity.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($logonSids[0], $fullControl, $allow))
+  $pipeSecurity.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($logonSid, $fullControl, $allow))
   $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
     $pipeName,
     [System.IO.Pipes.PipeDirection]::InOut,
@@ -49,7 +143,7 @@ try {
       $actualOwner -ne $userSid.Value -or
       $rules.Count -ne 1) { exit 4 }
   foreach ($rule in $rules) {
-    if ($rule.IdentityReference.Value -ne $logonSids[0].Value -or
+    if ($rule.IdentityReference.Value -ne $logonSid.Value -or
         $rule.AccessControlType -ne $allow -or
         $rule.PipeAccessRights -ne $fullControl) { exit 5 }
   }
@@ -58,7 +152,7 @@ try {
   $processOutput = [Console]::OpenStandardOutput()
   $processReadBuffer = New-Object byte[] 65536
   $processBuffer = New-Object 'System.Collections.Generic.List[byte]'
-  $processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)
+  $processRead = [WeixinChannelsVideo.NativeIpc.WindowsTransport]::ReadProcessInputAsync($processInput, $processReadBuffer)
   $pipeReadBuffer = New-Object byte[] 65536
   $pipeBuffer = New-Object 'System.Collections.Generic.List[byte]'
   [Console]::Error.WriteLine('READY')
@@ -71,7 +165,7 @@ try {
         $count = $processRead.GetAwaiter().GetResult()
         if ($count -eq 0) { $pipe.Dispose(); exit 0 }
         $processBuffer.AddRange([byte[]]$processReadBuffer[0..($count - 1)])
-        $processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)
+        $processRead = [WeixinChannelsVideo.NativeIpc.WindowsTransport]::ReadProcessInputAsync($processInput, $processReadBuffer)
       }
     }
     [void]$accept.GetAwaiter().GetResult()
@@ -100,7 +194,7 @@ try {
             $count = $processRead.GetAwaiter().GetResult()
             if ($count -eq 0) { $pipe.Dispose(); exit 0 }
             $processBuffer.AddRange([byte[]]$processReadBuffer[0..($count - 1)])
-            $processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)
+            $processRead = [WeixinChannelsVideo.NativeIpc.WindowsTransport]::ReadProcessInputAsync($processInput, $processReadBuffer)
             if ($processBuffer.Count -ge 4) {
               $hostHeader = $processBuffer.GetRange(0, 4).ToArray()
               $hostLength = [BitConverter]::ToUInt32($hostHeader, 0)
@@ -174,7 +268,7 @@ try {
           $count = $processRead.GetAwaiter().GetResult()
           if ($count -eq 0) { $pipe.Dispose(); exit 0 }
           $processBuffer.AddRange([byte[]]$processReadBuffer[0..($count - 1)])
-          $processRead = $processInput.ReadAsync($processReadBuffer, 0, $processReadBuffer.Length)
+          $processRead = [WeixinChannelsVideo.NativeIpc.WindowsTransport]::ReadProcessInputAsync($processInput, $processReadBuffer)
         }
       }
     } finally {
