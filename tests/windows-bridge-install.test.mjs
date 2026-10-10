@@ -227,6 +227,43 @@ test("Windows PowerShell and ACL integration runs against an isolated profile an
   });
 });
 
+test("Windows bridge inspection reports valid and invalid private-path security", async () => {
+  await withTempDir(async (tempRoot) => {
+    const chromeUserDataDir = await createChromeProfile(tempRoot);
+    const appSupportDir = join(tempRoot, "bridge");
+    const registry = registryMock();
+    const installed = await installBridge(installOptions({
+      root: tempRoot,
+      chromeUserDataDir,
+      appSupportDir,
+      registry,
+      securityCalls: [],
+      shortPathResolver: async () => { throw new Error("unexpected short-path resolution"); },
+    }));
+    const inspect = (securitySpawnSyncImpl) => inspectBridgeComponents(installed.config, {
+      platform: "win32",
+      env: { SystemRoot: "C:\\Windows" },
+      registry,
+      securitySpawnSyncImpl,
+      nodeSpawnSyncImpl: () => ({ status: 0, stdout: "v24.0.0\n" }),
+    });
+
+    const valid = await inspect(() => ({ status: 0, stdout: "", stderr: "" }));
+    assert.equal(valid.security, "valid");
+
+    const hostPath = join(appSupportDir, "native-host.mjs");
+    const invalid = await inspect((_executable, _args, options) => ({
+      status: options.env.WCV_PRIVATE_PATH === hostPath ? 1 : 0,
+      stdout: "",
+      stderr: "",
+    }));
+    assert.equal(invalid.registration, "valid");
+    assert.equal(invalid.host, "present");
+    assert.equal(invalid.launcher, "valid");
+    assert.equal(invalid.security, "invalid");
+  });
+});
+
 test("Windows launcher preserves stdio frames and the Chrome argv through cmd.exe", {
   skip: process.platform !== "win32",
 }, async () => {

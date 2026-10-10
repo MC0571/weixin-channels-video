@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { test } from 'node:test';
+import { gzipSync } from 'node:zlib';
 import { skillArchive, tarEntry } from './fixtures/skill-archive.mjs';
 import {
   MIN_NODE_VERSION,
@@ -79,6 +80,6 @@ test('runner rejects path traversal, links, duplicate portable names, and malfor
     tarEntry('weixin-channels-video', '', '5'),
     Buffer.alloc(1024),
   ]);
-  brokenEnd[512] = 1;
-  assert.throws(() => parseSkillArchive(gzipSync(brokenEnd)));
+  brokenEnd[1024] = 1;
+  assert.throws(() => parseSkillArchive(gzipSync(brokenEnd)), /Skill TAR 包结束标记无效/);
 });

@@ -12,7 +12,7 @@ import { createAgentCommandHandler } from "../extension/agent.mjs";
 import { BRIDGE_ERROR_MESSAGES, BridgeFrameDecoder, encodeBridgeFrame, isAbsoluteDownloadPath, isSafeRelativeMp4Filename, NATIVE_HOST_NAME, validateBridgeCommand, validateBridgeResponse } from "../src/native-messaging.mjs";
 import { createIpcNonce, createIpcProof, createWindowsPipeServer, isIpcSession, verifyIpcProof, windowsPipeName } from "../src/native-ipc.mjs";
 import { startNativeHost } from "../src/native-host.mjs";
-import { bridgeSocketPath, installBridge, inspectBridgeComponents, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
+import { BridgeSetupError, bridgeSocketPath, installBridge, inspectBridgeComponents, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
 import { BridgeError, requestBridge, waitForBridge } from "../skills/weixin-channels-video/scripts/bridge-client.mjs";
 import { runCli } from "../skills/weixin-channels-video/scripts/cli.mjs";
 import { secureWindowsPath } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
@@ -295,6 +295,7 @@ test("installer uses profile metadata only and writes private, exact user-level 
       registryDir,
       nodeExecutable: "/Applications/Node Runtime/bin/node",
       nativeHostSource,
+      platform: "darwin",
     });
     const manifest = JSON.parse(await readFile(installed.hostManifestPath, "utf8"));
     assert.deepEqual(manifest, {
@@ -342,6 +343,7 @@ test("installer uses profile metadata only and writes private, exact user-level 
       registryDir,
       nodeExecutable: "/Applications/Node Runtime/bin/node",
       nativeHostSource,
+      platform: "darwin",
     });
     assert.equal(updated.profile.directory, "Profile 3");
     assert.notEqual(await readBridgeSession(updated.config), sessionId);
@@ -353,6 +355,7 @@ test("installer uses profile metadata only and writes private, exact user-level 
       registryDir,
       nodeExecutable: "/Applications/Node Runtime/bin/node",
       nativeHostSource,
+      platform: "darwin",
     });
     assert.notEqual(await readBridgeSession(reconfigured.config), sessionId);
   });
@@ -379,6 +382,7 @@ test("installer refuses an unrelated Native Messaging host registration", async 
       chromeUserDataDir: chromeRoot,
       registryDir,
       nativeHostSource,
+      platform: "darwin",
     }), /Native Messaging 注册/);
     await assert.rejects(stat(appSupportDir), { code: "ENOENT" });
   });
@@ -400,8 +404,26 @@ test("installer does not replace orphaned host or launcher files without app own
       chromeUserDataDir: chromeRoot,
       registryDir,
       nativeHostSource,
+      platform: "darwin",
     }), /本地桥接文件/);
     assert.equal(await readFile(join(appSupportDir, "native-host.mjs"), "utf8"), "unrelated host contents");
+  });
+});
+
+test("installer rejects unsupported platforms before touching bridge paths", async () => {
+  await withShortTempDir(async (root) => {
+    const appSupportDir = join(root, "bridge");
+    await assert.rejects(installBridge({
+      extensionId: EXTENSION_ID,
+      profile: "Research",
+      appSupportDir,
+      chromeUserDataDir: join(root, "Chrome User Data"),
+      registryDir: join(root, "NativeMessagingHosts"),
+      platform: "linux",
+    }), (error) => error instanceof BridgeSetupError &&
+      error.code === "UNSUPPORTED_PLATFORM" &&
+      error.message === "本地桥接安装仅支持 macOS 和 Windows。");
+    await assert.rejects(stat(appSupportDir), { code: "ENOENT" });
   });
 });
 

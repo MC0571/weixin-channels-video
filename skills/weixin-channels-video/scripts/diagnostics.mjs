@@ -218,7 +218,7 @@ function nextActions({ chrome, profile, extension, bridge, connection, configura
   if (extension.state === "disabled") actions.push("ask_user_to_enable_extension");
   else if (extension.state === "missing_or_id_mismatch_possible") actions.push("verify_extension_id_or_load_extension_after_user_approval");
   else if (extension.state === "recorded_unknown") actions.push("check_extension_enabled_state_in_chrome");
-  if (["missing", "invalid"].some((state) => [bridge.registration, bridge.host, bridge.launcher].includes(state))) {
+  if (bridge.security === "invalid" || ["missing", "invalid"].some((state) => [bridge.registration, bridge.host, bridge.launcher].includes(state))) {
     actions.push("repair_bridge_if_authorized");
   }
   if (bridge.session === "missing" || bridge.session === "invalid") actions.push("repair_extension_pairing_after_user_approval");

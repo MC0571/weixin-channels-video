@@ -4,20 +4,20 @@ import { spawnSync } from "node:child_process";
 
 export const WINDOWS_PRIVATE_PATH_ASSERTION = String.raw`
 function Assert-WcvPrivatePath($path, $kind) {
-  $attributes = [System.IO.File]::GetAttributes($path)
-  if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'REPARSE_POINT' }
-  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-  if ($null -eq $identity) { throw 'MISSING_USER_SID' }
-  $acl = Get-Acl -LiteralPath $path
-  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.Value) { throw 'OWNER_MISMATCH' }
-  if (-not $acl.AreAccessRulesProtected) { throw 'INHERITED_ACL' }
-  $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-  if ($rules.Count -ne 1) { throw 'ACL_RULE_COUNT' }
-  $rule = $rules[0]
-  $expectedInheritance = [System.Security.AccessControl.InheritanceFlags]::None
+  $attributes = [System.IO.File]::GetAttributes($path);
+  if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'REPARSE_POINT' };
+  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User;
+  if ($null -eq $identity) { throw 'MISSING_USER_SID' };
+  $acl = Get-Acl -LiteralPath $path;
+  if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.Value) { throw 'OWNER_MISMATCH' };
+  if (-not $acl.AreAccessRulesProtected) { throw 'INHERITED_ACL' };
+  $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]));
+  if ($rules.Count -ne 1) { throw 'ACL_RULE_COUNT' };
+  $rule = $rules[0];
+  $expectedInheritance = [System.Security.AccessControl.InheritanceFlags]::None;
   if ($kind -eq 'directory') {
-    $expectedInheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-  }
+    $expectedInheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit;
+  };
   if ($rule.IdentityReference.Value -ne $identity.Value -or
       $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
       $rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl -or

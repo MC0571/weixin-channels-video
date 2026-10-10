@@ -330,6 +330,30 @@ test("diagnosis preserves native connection failures", async () => {
   assert.deepEqual(result.actions, ["restore_connection_before_next_task"]);
 });
 
+test("diagnosis recommends bridge repair when Windows private-path security is invalid", async () => {
+  const result = await diagnoseEnvironment({
+    configuration: "configured",
+    config: { profileDirectory: "Default", chromeUserDataDir: "C:\\Chrome User Data", extensionId: EXTENSION_ID },
+  }, {
+    platform: "win32",
+    inspectChrome: () => ({ installation: "installed", version: "154.0.8037.98", compatibility: "supported" }),
+    inspectRunning: () => "running",
+    inspectProfile: async () => ({ state: "exists", extension: "enabled" }),
+    inspectBridge: async () => ({
+      registration: "valid",
+      host: "present",
+      launcher: "valid",
+      node: "available",
+      session: "available",
+      security: "invalid",
+    }),
+  });
+  assert.equal(result.bridge.host, "present");
+  assert.equal(result.bridge.launcher, "valid");
+  assert.deepEqual(result.actions, ["repair_bridge_if_authorized"]);
+  assert.equal(result.nextAction, "repair_bridge_if_authorized");
+});
+
 test("bridge diagnostics runs the configured absolute Node safely and classifies its version", {
   skip: process.platform !== "darwin",
 }, async () => {
