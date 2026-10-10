@@ -51,23 +51,29 @@ flowchart TB
 
 视频详情 API 由扩展 service worker 直接请求。扩展临时添加一条仅匹配核心生成的固定 API URL、当前扩展发起的 POST/XHR 请求的 session DNR 规则，为该请求设置视频号 `Origin` 和完整 `Referer`，完成后删除规则。请求使用核心生成的 `_rid`、`_pageUrl`、请求体和含 `token`、`eid` 的 Referer，不携带视频号 Cookie；页面消息只接受扩展自己的 `index.html`，后台 Skill 任务复用同一请求校验，核对 API、页面参数和请求体彼此匹配。此功能需要 Chrome 116+、`declarativeNetRequestWithHostAccess` 权限及视频号站点访问权限。扩展不读取 Cookie，也不会回退到上游标签页。实际 Chrome 扩展解析、预览与下载验收见 [产品目标 #10](https://github.com/MC0571/weixin-channels-video/issues/10)，Skill CLI 与 Native Messaging 下载验收见 [产品目标 #4](https://github.com/MC0571/weixin-channels-video/issues/4)。
 
-扩展申请下载、`declarativeNetRequestWithHostAccess`、与本地桥接通信的 `nativeMessaging` 及访问两个上游站点所需的 host permissions。后台连接使用 `storage` 保存配对、`offscreen` 承接隐藏 iframe 和旧配对迁移、`alarms` 安排受控重连；升级时核对这些权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
+扩展申请下载、`declarativeNetRequestWithHostAccess`、与本地桥接通信的 `nativeMessaging` 及访问两个上游站点所需的 host permissions。后台连接使用 `storage` 保存配对、连接阶段和固定错误类别，`offscreen` 承接隐藏 iframe 和旧配对迁移，`alarms` 安排受控重连；页面只读取并显示许可状态值，不显示 `runtime.lastError` 原文。页面收到 native host 的 `ready` 仅确认 host 已报告就绪；Agent 与本地桥接的 IPC 握手由 CLI 的 `status` 确认。升级时核对这些权限。元宝登录凭据留在浏览器端，不发送给项目提供的第三方解析服务。
 
 扩展复用 Chrome 会话发请求，没有 `cookies` 权限。默认保存到 Chrome 下载目录，重名时自动改名；位置选择遵循 Chrome 自己的下载设置。页面显示下载完成或中断。Chrome 下载 API 会按浏览器规则向媒体主机携带该主机已有的 Cookie，不能通过此 API 设置 `credentials: omit`。[Chrome 下载 API 文档](https://developer.chrome.com/docs/extensions/reference/api/downloads#method-download)
 
 ## Skill 运行资源与桥接
 
-从仓库安装的 Skill 通过 `scripts/run.mjs` 准备正式 Release 资源，验证 SHA256、归档路径和运行协议后缓存。首次普通命令缺少资源时自动准备；之后复用本地缓存。显式 `prepare` 检查最新正式 Release。Release Skill 包直接复用随包资源。解析与下载仍由扩展执行。
+Skill 使用外部 Node.js 运行。用户版本要求为 Node.js 22.22.2+，由 `skills/weixin-channels-video/scripts/runtime-support.mjs` 提供单一门槛；开发、测试和 Worker 构建工具可有更高要求。实际 Agent、OS、Shell、CPU 架构、运行位置、Node 安装来源与 Chrome 可达性按[Agent 安装与本地运行边界](../skills/weixin-channels-video/references/agent-installation.md)核对。Codex 用户级 Skill 目录遵循其官方 `$HOME/.agents/skills/` 路径；其他宿主使用各自官方入口，不能推广为同一 `skills` CLI 参数或默认目录。
 
-`install-bridge` 注册 Chrome 用户级 Native Messaging host 和本工具的私有配置，不修改 Chrome profile 设置或读取 Cookie。桥接目录权限为 `0700`，配置与本地 Unix socket 为 `0600`，host 仅接受已登记的扩展 ID。桥接传递固定任务和结果，不提供任意网址请求或 JavaScript 执行接口。
+从仓库安装的 Skill 通过 `scripts/run.mjs` 准备正式 Release 资源，验证 SHA256、归档路径和运行协议后缓存。首次普通命令缺少资源时自动准备；之后复用本地缓存。显式 `prepare` 检查最新正式 Release。Release Skill 包直接复用随包资源。源码 Skill runner 调用下载的打包 CLI，不要求克隆源码仓库或在用户侧构建；解析与下载仍由扩展执行。
+
+`install-bridge` 注册 Chrome 用户级 Native Messaging host 和本工具的私有配置，不修改 Chrome profile 设置或读取 Cookie。macOS 使用权限为 `0700` 的用户私有目录、`0600` 配置和 Unix socket；Windows 使用由当前用户 SID 拥有并 ACL 限制给当前用户的目录/文件，以及 owner 为当前用户 SID、仅允许当前 logon SID 的单实例短生命周期命名管道。Chrome 扩展与 Native Messaging host 保持 wire v1；桥接客户端与 host 的本地 IPC 使用 v2，以保存在私有 `session.json` 中的 32-byte secret 校验带新鲜 nonce 且绑定角色和版本的 HMAC。IPC 帧不传 IPC secret 或 Chrome 配对 session ID；Windows 管道端点名由私有目录和 session ID 派生为哈希，macOS socket 文件名包含 session ID 的短前缀。Secret 不进入 Native Messaging `ready` 消息、IPC 端点名或日志。Host 仅接受已登记的扩展 ID，桥接传递固定任务和结果，不提供任意网址请求或 JavaScript 执行接口。
+
+`bridge.json` 缺少 `ipcProtocol` 时按本地 IPC v1 处理。首次执行 v2 `install-bridge` 会自动迁移配置、轮换 IPC secret 与配对 session ID，并重新配对一次；完成后，身份相同的 v2 桥接升级保留 session ID、secret 和现有配对。Chrome 扩展侧 wire v1 不随这次本地 IPC 升级改变。
 
 首次授权、安装和配对完成后，扩展后台自动连接本地桥接。Chrome 启动、扩展重载或连接中断后按受控退避恢复连接。配对保存在所选 profile 内，其他 profile 不能直接使用这份连接；旧页面 localStorage 配对自动迁移。页面没有 AI 连接开关，关闭、刷新或不打开插件主页均可通过 Skill 解析与下载。手动解析与下载继续独立可用。
 
 `connect` 复用已有连接；Chrome 未运行时后台启动所选 profile 的正常 Chrome，等待扩展后台连通。首次或修复配对时可能短暂打开初始化页，配对保存后该页自行关闭，无需保留元宝、视频号或插件标签页。`parse` / `download` 在提交任务前恢复连接，提交之后不会因超时或断连自动重发，以免重复下载。`status` 报告桥接配置、连接与登录状态；网络或响应异常不会被当作未登录。
 
-`diagnose` 只读检查 Chrome 安装、版本、运行状态、所选 profile、扩展记录、Native Messaging 注册和桥接文件、配对及通信状态，返回结构化状态和下一步建议。未确定的原因保留为 `unknown`；`recorded_unknown` 表示已有扩展记录但无法确认启用状态。扩展记录缺失还可能是 ID 不匹配，不能单凭通信超时认定未安装。
+`diagnose` 只读检查 Chrome 安装、版本、运行状态、所选 profile、扩展记录、Native Messaging 注册和桥接文件、桥接使用的 Node、配对及通信状态。`runtime` 描述随包 `runtime.json` 中的版本和协议；`currentNode.version` / `currentNode.absolutePath` 描述运行 CLI 的 Node；`bridge.node` / `bridge.nodeVersion` 描述桥接配置实际使用的 Node。诊断返回 `actions` 和单项 `nextAction`；候选诊断把候选动作置于 Chrome/Node 阻断项之后、未配置桥接的泛化动作之前。未确定的原因保留为 `unknown`；普通诊断中的 `recorded_unknown` 表示已有扩展记录但无法确认启用状态；`missing_or_id_mismatch_possible` 也可能是扩展 ID 不匹配。
 
-具体安装与恢复规则见 [Skill 指引](../skills/weixin-channels-video/SKILL.md)。加载扩展时使用 `prepare` 返回的 `extensionAssets` 实际绝对目录。
+未注册桥接时，可用 `diagnose --profile NAME --extension-id ID` 只读核对候选 profile 和扩展 ID。两项必须同时提供，命令不读取已有桥接配置。返回的 `candidate.checkScope` 是 `chrome_profile_metadata`，`candidate.status` 为 `recorded_enabled`、`recorded_disabled` 或 `unverified`，并包含 `reason`、profile/extension 状态、`liveHandshake: not_checked` 与单项 `nextAction`。记录状态仅来自 profile 元数据，不证明扩展来源、当前加载位置或实时握手；扩展记录缺失也可能是 ID 不匹配，不能单凭连接超时认定未安装。
+
+共享安装与恢复流程见 [Skill 指引](../skills/weixin-channels-video/SKILL.md)。宿主安装入口、OS/Node/命令能力及本地权限见 [Agent 安装说明](../skills/weixin-channels-video/references/agent-installation.md)。读取该说明并确认运行环境后再执行 Node/prepare 命令。加载扩展时使用 `prepare` 返回的 `extensionAssets` 实际绝对目录；该目录应持续保留以维持解压扩展身份。
 
 `download` 默认使用共享核心选定的视频版本，默认文件名为 `<title>.mp4`，非法文件名字符会清理，过长标题会截短。`--filename` 指定 Chrome 下载目录内的相对文件名。保存位置与位置选择遵循 Chrome 下载设置，重名时自动改名；命令等待 Chrome 报告下载完成后返回最终文件路径、字节数及已解析的视频信息和各版本链接，中断或超时返回错误。它不支持任意绝对输出路径。
 
@@ -113,7 +119,7 @@ npm run build
 
 本地开发也可加载仓库的 `extension/` 目录。先运行 `npm run build`，它会从共享核心生成扩展所需的 JavaScript 文件；源码更新后再次构建，并在 `chrome://extensions` 重新加载扩展。直接加载尚未构建的源码目录会导致解析按钮无法工作。
 
-Skill 包放到宿主的技能目录。例如 Codex 的 `~/.codex/skills/weixin-channels-video/`；已存在同名 Skill 时先检查内容，避免覆盖。Chrome 扩展点击工具栏图标后在独立标签页打开，关闭页面不会取消 Chrome 已启动的下载。
+Skill 包放到宿主的技能目录。例如 Codex 用户级目录为 `~/.agents/skills/weixin-channels-video/`；其他宿主的安装目录和导入方式见 [Agent 安装说明](../skills/weixin-channels-video/references/agent-installation.md)。已存在同名 Skill 时先检查内容，避免覆盖。Chrome 扩展点击工具栏图标后在独立标签页打开，关闭页面不会取消 Chrome 已启动的下载。
 
 ### 版本包与自动发布
 
