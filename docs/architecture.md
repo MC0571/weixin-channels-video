@@ -123,7 +123,7 @@ Skill 包放到宿主的技能目录。例如 Codex 用户级目录为 `~/.agent
 
 ### 版本包与自动发布
 
-[`Releases`](https://github.com/MC0571/weixin-channels-video/releases) 提供扩展 ZIP、独立 Skill TAR.GZ 和 `SHA256SUMS`。扩展 ZIP 解压后可通过 Chrome 开发者模式加载；Skill TAR.GZ 解压后只有一个 `weixin-channels-video/` 目录，安装与桥接步骤见 [README](../README.md#ai-skill)。
+[`Releases`](https://github.com/MC0571/weixin-channels-video/releases) 提供扩展 ZIP、独立 Skill TAR.GZ / ZIP 和 `SHA256SUMS`。扩展 ZIP 解压后可通过 Chrome 开发者模式加载；Skill 包解压后只有一个 `weixin-channels-video/` 目录，安装与桥接步骤见 [README](../README.md#ai-skill)。
 
 本地生成发布包需要 Node.js 24+ 和 Python 3（只使用标准库）：
 
@@ -136,6 +136,7 @@ npm run release:package
 
 - `weixin-channels-video-extension-v<版本>.zip`
 - `weixin-channels-video-skill-v<版本>.tar.gz`
+- `weixin-channels-video-skill-v<版本>.zip`
 - `SHA256SUMS`
 
 更新版本时同步 `package.json` 和 lockfile 的包版本。合并包含 manifest 变更的提交到 main 后，Release 工作流先执行仓库检查，再创建对应提交的 GitHub Release，并将扩展上传 Chrome Web Store 送审；审核通过后自动上线。也可从 main 手动运行工作流。相同版本的 Release 只允许复用同一提交，已有资产不会被覆盖；商店拒绝或返回警告时工作流停止，由维护者检查后台后处理。

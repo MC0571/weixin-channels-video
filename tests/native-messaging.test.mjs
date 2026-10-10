@@ -103,7 +103,7 @@ function createAuthenticatedFakeServer({ sessionInfo = SESSION_INFO, hostSecret 
 
 async function createHostFixture(root, sessionId = SESSION_1) {
   const appSupportDir = join(root, "app");
-  await mkdir(appSupportDir, { recursive: true, mode: 0o700 });
+  await mkdir(appSupportDir, { mode: 0o700 });
   await chmod(appSupportDir, 0o700);
   const configPath = join(appSupportDir, "bridge.json");
   await writeFile(configPath, JSON.stringify({
@@ -113,12 +113,12 @@ async function createHostFixture(root, sessionId = SESSION_1) {
     ipcProtocol: 2,
     extensionId: EXTENSION_ID,
     appSupportDir,
-  }), { mode: 0o600 });
-  await writeFile(join(appSupportDir, "session.json"), JSON.stringify({ version: 1, sessionId, ipcProtocol: 2, ipcSecret: IPC_SECRET }), { mode: 0o600 });
+  }), { mode: 0o600, flag: "wx" });
+  await writeFile(join(appSupportDir, "session.json"), JSON.stringify({ version: 1, sessionId, ipcProtocol: 2, ipcSecret: IPC_SECRET }), { mode: 0o600, flag: "wx" });
   if (process.platform === "win32") {
-    await secureWindowsPath(appSupportDir, { directory: true });
-    await secureWindowsPath(configPath);
-    await secureWindowsPath(join(appSupportDir, "session.json"));
+    await secureWindowsPath(appSupportDir, { directory: true, newlyCreated: true });
+    await secureWindowsPath(configPath, { newlyCreated: true });
+    await secureWindowsPath(join(appSupportDir, "session.json"), { newlyCreated: true });
   }
   const input = new PassThrough();
   const output = new PassThrough();

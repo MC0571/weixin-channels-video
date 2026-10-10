@@ -51,18 +51,18 @@ try {
     ipcProtocol: 2,
     extensionId,
     appSupportDir: root,
-  }));
+  }), { flag: "wx" });
   const sessionPath = join(root, "session.json");
   await writeFile(sessionPath, JSON.stringify({
     version: 1,
     sessionId,
     ipcProtocol: 2,
     ipcSecret: "a".repeat(64),
-  }));
+  }), { flag: "wx" });
   if (process.platform === "win32") {
-    await secureWindowsPath(root, { directory: true });
-    await secureWindowsPath(configPath);
-    await secureWindowsPath(sessionPath);
+    await secureWindowsPath(root, { directory: true, newlyCreated: true });
+    await secureWindowsPath(configPath, { newlyCreated: true });
+    await secureWindowsPath(sessionPath, { newlyCreated: true });
   }
   host = await startNativeHost({
     configPath,

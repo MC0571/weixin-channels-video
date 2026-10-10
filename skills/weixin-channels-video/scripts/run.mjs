@@ -85,10 +85,36 @@ async function readRegularFile(path) {
   return readFile(path);
 }
 
-async function protectCacheDirectory(path) {
+async function secureNewCacheDirectory(path) {
   if (process.platform === "win32") {
-    await secureWindowsPath(path, { directory: true });
+    await secureWindowsPath(path, { directory: true, newlyCreated: true });
   }
+}
+
+async function assertPrivateCacheDirectory(path) {
+  if (process.platform === "win32") {
+    await assertWindowsPrivatePath(path, { directory: true });
+  }
+}
+
+async function createOrAssertCacheDirectory(path) {
+  let newlyCreated = false;
+  try {
+    await mkdir(path, { recursive: false, mode: 0o700 });
+    newlyCreated = true;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) fail("运行资源缓存目录不安全。");
+  if (newlyCreated) await secureNewCacheDirectory(path);
+  else await assertPrivateCacheDirectory(path);
+}
+
+async function ensureNewCacheDirectory(path) {
+  await mkdir(path, { recursive: false, mode: 0o700 });
+  await secureNewCacheDirectory(path);
 }
 
 async function assertPrivateRuntime(root) {
@@ -105,7 +131,7 @@ async function assertPrivateRuntime(root) {
 async function writeCacheFile(path, contents) {
   if (process.platform === "win32") {
     await writeFile(path, "", { flag: "wx", mode: 0o600 });
-    await secureWindowsPath(path);
+    await secureWindowsPath(path, { newlyCreated: true });
     await writeFile(path, contents);
     return;
   }
@@ -366,18 +392,19 @@ export function parseSkillArchive(archiveBytes) {
 export async function unpackSkillArchive(archiveBytes, destination) {
   const members = parseSkillArchive(archiveBytes);
   const destinationRoot = resolve(destination);
-  await mkdir(destinationRoot, { recursive: false, mode: 0o700 });
-  await protectCacheDirectory(destinationRoot);
-  for (const [path, member] of members) {
+  await ensureNewCacheDirectory(destinationRoot);
+  const directories = [...members].filter(([, member]) => member.directory)
+    .sort(([first], [second]) => first.split("/").length - second.split("/").length);
+  for (const [path] of directories) {
     const target = resolve(destinationRoot, ...path.split("/"));
     if (target !== destinationRoot && !target.startsWith(destinationRoot + sep)) fail("Skill TAR 包包含越界路径。");
-    if (member.directory) {
-      await mkdir(target, { recursive: false, mode: 0o700 });
-      await protectCacheDirectory(target);
-    } else {
-      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-      await writeCacheFile(target, member.data);
-    }
+    await ensureNewCacheDirectory(target);
+  }
+  for (const [path, member] of members) {
+    if (member.directory) continue;
+    const target = resolve(destinationRoot, ...path.split("/"));
+    if (target !== destinationRoot && !target.startsWith(destinationRoot + sep)) fail("Skill TAR 包包含越界路径。");
+    await writeCacheFile(target, member.data);
   }
 }
 
@@ -389,14 +416,8 @@ async function ensureCacheRoot() {
   await mkdir(appCacheRoot, { recursive: true, mode: 0o700 });
   const appInfo = await lstat(appCacheRoot);
   if (!appInfo.isDirectory() || appInfo.isSymbolicLink()) fail("工具缓存目录不安全。");
-  await mkdir(LEGACY_CACHE_ROOT, { recursive: true, mode: 0o700 });
-  const legacyInfo = await lstat(LEGACY_CACHE_ROOT);
-  if (!legacyInfo.isDirectory() || legacyInfo.isSymbolicLink()) fail("运行资源缓存目录不安全。");
-  await protectCacheDirectory(LEGACY_CACHE_ROOT);
-  await mkdir(CACHE_ROOT, { recursive: true, mode: 0o700 });
-  const info = await lstat(CACHE_ROOT);
-  if (!info.isDirectory() || info.isSymbolicLink()) fail("运行资源缓存目录不安全。");
-  await protectCacheDirectory(CACHE_ROOT);
+  await createOrAssertCacheDirectory(LEGACY_CACHE_ROOT);
+  await createOrAssertCacheDirectory(CACHE_ROOT);
   if (process.platform === "darwin") {
     await chmod(LEGACY_CACHE_ROOT, 0o700);
     await chmod(CACHE_ROOT, 0o700);
@@ -414,7 +435,7 @@ async function inspectExtensionTree(root, copyTo) {
       if (files > MAX_ARCHIVE_FILES) fail("扩展运行资源成员过多。");
       if (destination) {
         await mkdir(destination, { recursive: false, mode: 0o700 });
-        await protectCacheDirectory(destination);
+        await secureNewCacheDirectory(destination);
       }
       for (const name of await readdir(source)) {
         if (!isPortableSegment(name)) fail("扩展运行资源路径无效。");
@@ -543,7 +564,9 @@ async function replaceExtensionAssets(source, location, version) {
   }
 
   const parent = dirname(destination);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const parentInfo = await lstat(parent);
+  if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) fail("扩展加载目录无效，已保留现有资源。");
+  await assertPrivateCacheDirectory(parent);
   const stage = join(parent, ".extension-stage-" + randomUUID());
   const backup = destinationInfo ? join(parent, ".extension-previous-" + randomUUID()) : null;
   try {
@@ -611,7 +634,7 @@ async function prepareFromRelease() {
     await ensureCacheRoot();
     const stage = await mkdtemp(join(CACHE_ROOT, ".prepare-" + version + "-"));
     try {
-      await protectCacheDirectory(stage);
+      await secureNewCacheDirectory(stage);
       const payload = join(stage, "payload");
       await unpackSkillArchive(archiveBytes, payload);
       const source = join(payload, "weixin-channels-video");
@@ -642,13 +665,11 @@ async function cachePackagedRuntime(runtime) {
 
   const stage = await mkdtemp(join(CACHE_ROOT, ".package-" + runtime.version + "-"));
   try {
-    await protectCacheDirectory(stage);
+    await secureNewCacheDirectory(stage);
     const scripts = join(stage, "scripts");
     const assets = join(stage, "assets");
-    await mkdir(scripts, { mode: 0o700 });
-    await protectCacheDirectory(scripts);
-    await mkdir(assets, { mode: 0o700 });
-    await protectCacheDirectory(assets);
+    await ensureNewCacheDirectory(scripts);
+    await ensureNewCacheDirectory(assets);
     await copyCacheFile(join(SKILL_ROOT, "runtime.json"), join(stage, "runtime.json"));
     await copyCacheFile(runtime.runtimeCLI, join(scripts, "cli.mjs"));
     await copyCacheFile(join(dirname(runtime.runtimeCLI), "native-host.mjs"), join(scripts, "native-host.mjs"));

@@ -78,7 +78,7 @@ async function waitForEvent(emitter, event, timeoutMs = 10_000) {
 
 async function createFixture(root) {
   const appSupportDir = join(root, "app");
-  await mkdir(appSupportDir, { recursive: true });
+  await mkdir(appSupportDir);
   const configPath = join(appSupportDir, "bridge.json");
   const sessionPath = join(appSupportDir, "session.json");
   await writeFile(configPath, JSON.stringify({
@@ -88,11 +88,11 @@ async function createFixture(root) {
     ipcProtocol: 2,
     extensionId,
     appSupportDir,
-  }));
-  await writeFile(sessionPath, JSON.stringify({ version: 1, sessionId, ipcProtocol: 2, ipcSecret }));
-  await secureWindowsPath(appSupportDir, { directory: true });
-  await secureWindowsPath(configPath);
-  await secureWindowsPath(sessionPath);
+  }), { flag: "wx" });
+  await writeFile(sessionPath, JSON.stringify({ version: 1, sessionId, ipcProtocol: 2, ipcSecret }), { flag: "wx" });
+  await secureWindowsPath(appSupportDir, { directory: true, newlyCreated: true });
+  await secureWindowsPath(configPath, { newlyCreated: true });
+  await secureWindowsPath(sessionPath, { newlyCreated: true });
   const config = { appSupportDir, platform: "win32" };
   const sessionInfo = { sessionId, ipcProtocol: 2, ipcSecret };
   return { appSupportDir, configPath, config, sessionInfo, socketPath: bridgeSocketPath(config, sessionId) };

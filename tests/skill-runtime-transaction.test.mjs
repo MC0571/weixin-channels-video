@@ -88,22 +88,28 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
     const runtime = await import('../skills/weixin-channels-video/scripts/run.mjs');
     const legacyRoot = runtime.platformCacheRoot();
     const cacheRoot = join(legacyRoot, 'protocol-' + runtime.RUNTIME_PROTOCOL);
-    const oldExtension = join(legacyRoot, '0.1.1', 'assets', 'extension');
-    await mkdir(oldExtension, { recursive: true });
-    await writeFile(join(oldExtension, 'manifest.json'), JSON.stringify({ version: '0.1.1' }));
-    await writeFile(join(legacyRoot, 'current.json'), JSON.stringify({
+    const versionRoot = join(legacyRoot, '0.1.1');
+    const assetsRoot = join(versionRoot, 'assets');
+    const oldExtension = join(assetsRoot, 'extension');
+    const oldManifest = join(oldExtension, 'manifest.json');
+    const legacyMarker = join(legacyRoot, 'current.json');
+    if (process.platform === 'win32') {
+      await mkdir(join(tempRoot, 'LocalAppData', 'weixin-channels-video'), { recursive: true });
+      for (const directory of [legacyRoot, versionRoot, assetsRoot, oldExtension]) {
+        await mkdir(directory, { recursive: false });
+        await secureWindowsPath(directory, { directory: true, newlyCreated: true });
+      }
+    } else {
+      await mkdir(oldExtension, { recursive: true });
+    }
+    await writeFile(oldManifest, JSON.stringify({ version: '0.1.1' }), { flag: 'wx' });
+    await writeFile(legacyMarker, JSON.stringify({
       version: '0.1.1',
       runtimeProtocol: 1,
-    }));
+    }), { flag: 'wx' });
     if (process.platform === 'win32') {
-      for (const directory of [
-        legacyRoot,
-        join(legacyRoot, '0.1.1'),
-        join(legacyRoot, '0.1.1', 'assets'),
-        oldExtension,
-      ]) await secureWindowsPath(directory, { directory: true });
-      await secureWindowsPath(join(oldExtension, 'manifest.json'));
-      await secureWindowsPath(join(legacyRoot, 'current.json'));
+      await secureWindowsPath(oldManifest, { newlyCreated: true });
+      await secureWindowsPath(legacyMarker, { newlyCreated: true });
     }
 
     let activeRelease = makeRelease('0.2.0');

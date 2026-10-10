@@ -23,7 +23,7 @@ function Assert-WcvPrivatePath($path, $kind) {
       $rule.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl -or
       $rule.InheritanceFlags -ne $expectedInheritance -or
       $rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None -or
-      $rule.IsInherited) { throw 'ACL_RULE_MISMATCH' }
+      $rule.IsInherited) { throw 'ACL_CHECK_FAILED' }
 }
 `;
 
@@ -32,16 +32,22 @@ $ErrorActionPreference = 'Stop'
 $path = $env:WCV_PRIVATE_PATH
 $mode = $env:WCV_PRIVATE_MODE
 $kind = $env:WCV_PRIVATE_KIND
+$newlyCreated = $env:WCV_PRIVATE_NEWLY_CREATED -eq '1'
 ${WINDOWS_PRIVATE_PATH_ASSERTION}
 try {
   $attributes = [System.IO.File]::GetAttributes($path)
   if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 20 }
-  $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+  $token = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+  $identity = $token.User
   if ($null -eq $identity) { exit 21 }
   $acl = Get-Acl -LiteralPath $path
   if ($mode -eq 'secure') {
     $currentOwner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
-    if ($currentOwner -ne $identity.Value) { exit 22 }
+    if ($currentOwner -ne $identity.Value) {
+      $tokenOwner = $token.Owner
+      if (-not $newlyCreated -or $null -eq $tokenOwner -or $currentOwner -ne $tokenOwner.Value) { exit 22 }
+      $acl.SetOwner($identity)
+    }
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($entry in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($entry) }
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
@@ -61,6 +67,12 @@ try {
   Assert-WcvPrivatePath $path $kind
   exit 0
 } catch {
+  if ($_.Exception.Message -eq 'MISSING_USER_SID') { exit 21 }
+  if ($_.Exception.Message -eq 'OWNER_MISMATCH') { exit 22 }
+  if ($_.Exception.Message -eq 'REPARSE_POINT') { exit 20 }
+  if ($_.Exception.Message -eq 'INHERITED_ACL' -or
+      $_.Exception.Message -eq 'ACL_RULE_COUNT' -or
+      $_.Exception.Message -eq 'ACL_CHECK_FAILED') { exit 23 }
   exit 26
 }
 `;
@@ -74,6 +86,7 @@ export function windowsPowerShellPath(env = process.env) {
 }
 
 function runAccessControl(path, mode, directory, {
+  newlyCreated = false,
   platform = process.platform,
   env = process.env,
   spawnSyncImpl = spawnSync,
@@ -95,9 +108,22 @@ function runAccessControl(path, mode, directory, {
       WCV_PRIVATE_PATH: path,
       WCV_PRIVATE_MODE: mode,
       WCV_PRIVATE_KIND: directory ? "directory" : "file",
+      WCV_PRIVATE_NEWLY_CREATED: newlyCreated ? "1" : "0",
     },
   });
-  if (result.error || result.status !== 0) throw new Error("WINDOWS_PATH_UNSAFE");
+  if (result.error || result.status !== 0) {
+    const failures = {
+      20: "WINDOWS_PATH_UNSAFE",
+      21: "WINDOWS_SECURITY_IDENTITY_UNAVAILABLE",
+      22: "WINDOWS_PATH_OWNER_MISMATCH",
+      23: "WINDOWS_ACL_CHECK_FAILED",
+    };
+    const code = failures[result.status] ?? "WINDOWS_SECURITY_COMMAND_FAILED";
+    const error = new Error(code);
+    error.code = code;
+    error.exitCode = Number.isInteger(result.status) ? result.status : null;
+    throw error;
+  }
 }
 
 async function assertFileKind(path, directory) {
@@ -119,12 +145,13 @@ export async function assertWindowsPrivatePath(path, {
 
 export async function secureWindowsPath(path, {
   directory = false,
+  newlyCreated = false,
   platform = process.platform,
   env = process.env,
   spawnSyncImpl = spawnSync,
 } = {}) {
   await assertFileKind(path, directory);
-  runAccessControl(path, "secure", directory, { platform, env, spawnSyncImpl });
+  runAccessControl(path, "secure", directory, { newlyCreated, platform, env, spawnSyncImpl });
 }
 
 export async function inspectWindowsPathSecurity(path, options) {

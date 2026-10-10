@@ -130,10 +130,14 @@ function defaultAppSupportDir({ platform = process.platform, home = homedir(), e
 }
 
 async function ensurePrivateDirectory(path, platform = process.platform, securityOptions = {}) {
-  await mkdir(path, { recursive: true, mode: 0o700 });
+  const createdPath = await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Bridge directory is unsafe.");
-  if (platform === "win32") await secureWindowsPath(path, { ...securityOptions, directory: true });
+  if (platform === "win32") await secureWindowsPath(path, {
+    ...securityOptions,
+    directory: true,
+    newlyCreated: createdPath !== undefined,
+  });
   else await chmod(path, 0o700);
 }
 
@@ -155,7 +159,7 @@ async function atomicWrite(path, content, mode, { replace = false, platform = pr
   const tempPath = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(tempPath, content, { encoding: "utf8", mode, flag: "wx" });
-    if (platform === "win32") await secureWindowsPath(tempPath, securityOptions);
+    if (platform === "win32") await secureWindowsPath(tempPath, { ...securityOptions, newlyCreated: true });
     else await chmod(tempPath, mode);
     await rename(tempPath, path);
     if (platform === "win32") await secureWindowsPath(path, securityOptions);
@@ -175,7 +179,7 @@ async function installWindowsBundle(entries, securityOptions, register) {
   try {
     for (const entry of transaction) {
       await writeFile(entry.stagePath, entry.content, { encoding: "utf8", mode: entry.mode, flag: "wx" });
-      await secureWindowsPath(entry.stagePath, securityOptions);
+      await secureWindowsPath(entry.stagePath, { ...securityOptions, newlyCreated: true });
     }
     for (const entry of transaction) {
       let existing;
