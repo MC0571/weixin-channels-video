@@ -18,4 +18,32 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run worker:build
-      - run: python3 -m unittest discover -s skills/weixin-channels-video/scripts -p 'test_*.py'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skill-runtime
+          path: dist/weixin-channels-video
+          if-no-files-found: error
+          retention-days: 1
+  runtime-node-minimum:
+    needs: check
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: skill-runtime
+          path: dist/weixin-channels-video
+      - run: node --test tests/skill-runtime.test.mjs
+      - run: node --test tests/skill-runtime-transaction.test.mjs
+      - run: node dist/weixin-channels-video/scripts/run.mjs help
+      - run: |
+          node tests/skill-runtime-package-smoke.mjs
+      - name: Native host protocol smoke
+        if: runner.os == 'macOS'
+        run: node tests/skill-runtime-host-smoke.mjs

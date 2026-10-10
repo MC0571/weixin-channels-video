@@ -31,7 +31,6 @@ jobs:
       # release:package runs the regular build before creating the archives.
       - run: npm run release:package
       - run: npm run worker:build
-      - run: python3 -m unittest discover -s skills/weixin-channels-video/scripts -p 'test_*.py'
       - run: (cd dist/release && sha256sum -c SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
@@ -99,6 +98,7 @@ jobs:
           for asset in \
             "dist/release/weixin-channels-video-extension-v${VERSION}.zip" \
             "dist/release/weixin-channels-video-skill-v${VERSION}.tar.gz" \
+            "dist/release/weixin-channels-video-skill-v${VERSION}.zip" \
             "dist/release/SHA256SUMS"; do
             name="${asset##*/}"
             if jq -e --arg name "$name" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then

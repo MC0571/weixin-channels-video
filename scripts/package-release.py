@@ -22,6 +22,7 @@ def main():
     version = manifest["version"]
     extension_name = f"weixin-channels-video-extension-v{version}.zip"
     skill_name = f"weixin-channels-video-skill-v{version}.tar.gz"
+    skill_zip_name = f"weixin-channels-video-skill-v{version}.zip"
     extension_dir = ROOT / "dist/extension"
     skill_dir = ROOT / "dist/weixin-channels-video"
     output_dir = args.output_dir.resolve()
@@ -29,16 +30,18 @@ def main():
 
     extension_path = output_dir / extension_name
     skill_path = output_dir / skill_name
+    skill_zip_path = output_dir / skill_zip_name
     write_extension_zip(extension_dir, extension_path)
     write_skill_archive(skill_dir, skill_path)
+    write_skill_zip(skill_dir, skill_zip_path)
 
     checksums = "".join(
         f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-        for path in sorted((extension_path, skill_path), key=lambda item: item.name)
+        for path in sorted((extension_path, skill_path, skill_zip_path), key=lambda item: item.name)
     )
     with (output_dir / "SHA256SUMS").open("w", encoding="ascii", newline="\n") as sums_file:
         sums_file.write(checksums)
-    print(f"Built {extension_name}, {skill_name}, and SHA256SUMS in {output_dir}.")
+    print(f"Built {extension_name}, {skill_name}, {skill_zip_name}, and SHA256SUMS in {output_dir}.")
 
 
 def write_extension_zip(extension_dir, archive_path):
@@ -86,6 +89,28 @@ def write_skill_archive(skill_dir, archive_path):
     with archive_path.open("wb") as output:
         with gzip.GzipFile(filename="", fileobj=output, mode="wb", compresslevel=9, mtime=0) as compressed:
             compressed.write(tar_buffer.getvalue())
+
+
+def write_skill_zip(skill_dir, archive_path):
+    entries = [(skill_dir, "weixin-channels-video/")]
+    entries.extend(
+        (path, f"weixin-channels-video/{path.relative_to(skill_dir).as_posix()}")
+        for path in skill_dir.rglob("*")
+    )
+    entries.sort(key=lambda item: item[1])
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as archive:
+        for path, name in entries:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.compress_type = zipfile.ZIP_STORED
+            info.flag_bits = 0x800
+            if path.is_dir():
+                info.external_attr = ((stat.S_IFDIR | 0o755) << 16) | 0x10
+                archive.writestr(info, b"")
+            elif path.is_file():
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                archive.writestr(info, path.read_bytes())
 
 
 if __name__ == "__main__":
