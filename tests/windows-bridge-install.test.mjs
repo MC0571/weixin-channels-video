@@ -325,11 +325,12 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
     const config = JSON.parse(await readFile(join(appSupportDir, "bridge.json"), "utf8"));
     const origin = `chrome-extension://${extensionId}/`;
     const input = Buffer.from([0x00, 0x03, 0x7b, 0xff, 0x00, 0x0d, 0x0a]);
-    const invocation = `"${manifest.path}" ${origin} --parent-window=12345`;
+    const invocation = `""${manifest.path}" ${origin} --parent-window=12345"`;
     const child = spawnSync("cmd.exe", ["/d", "/s", "/c", invocation], {
       input,
       encoding: null,
       windowsHide: true,
+      windowsVerbatimArguments: true,
       timeout: 15_000,
       env: { ...process.env, WCV_CAPTURE: capturePath },
     });
@@ -384,10 +385,11 @@ test("Windows launcher passes the canonical long config path when Chrome uses th
     assert.doesNotMatch(manifest.path, /!/);
     const origin = `chrome-extension://${extensionId}/`;
     const input = Buffer.from([0x00, 0x02, 0x7b, 0xff, 0x00, 0x0d, 0x0a]);
-    const child = spawnSync("cmd.exe", ["/d", "/s", "/c", `"${manifest.path}" ${origin} --parent-window=12345`], {
+    const child = spawnSync("cmd.exe", ["/d", "/s", "/c", `""${manifest.path}" ${origin} --parent-window=12345"`], {
       input,
       encoding: null,
       windowsHide: true,
+      windowsVerbatimArguments: true,
       timeout: 15_000,
       env: { ...process.env, WCV_CAPTURE: capturePath },
     });
