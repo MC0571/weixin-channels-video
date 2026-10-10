@@ -81,6 +81,15 @@ h2 {
   line-height: 1.55;
 }
 
+.ai-prompt-popover .bridge-connection-status:not([hidden]) {
+  margin-bottom: 10px;
+  color: #c6c6c6;
+}
+
+.ai-prompt-popover .bridge-connection-status[data-error="true"] {
+  color: #ffb4ab;
+}
+
 .card {
   margin-bottom: 14px;
   padding: 22px;

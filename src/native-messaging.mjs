@@ -27,6 +27,14 @@ export const BRIDGE_ERROR_MESSAGES = Object.freeze({
   DOWNLOAD_STATUS_UNAVAILABLE: "Chrome 无法读取下载状态。",
 });
 
+export function isAbsoluteDownloadPath(value) {
+  return typeof value === "string" && (
+    value.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    /^(?:\\\\|\/\/)(?![?.](?:[\\/]|$))[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(value)
+  );
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -129,7 +137,7 @@ export function validateBridgeResponse(value, requestId) {
     value.error?.code === "DOWNLOAD_INTERRUPTED" &&
     hasExactKeys(value.result, ["state", "path", "bytes"]) &&
     value.result.state === "interrupted" &&
-    typeof value.result.path === "string" && value.result.path.startsWith("/") &&
+    isAbsoluteDownloadPath(value.result.path) &&
     Number.isInteger(value.result.bytes) && value.result.bytes > 0
   );
   return hasErrorShape && downloadResultIsValid &&

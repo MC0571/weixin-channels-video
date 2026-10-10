@@ -944,6 +944,57 @@ test("pairing opens one background Native Messaging port and keeps task result f
   });
 });
 
+test("rotating a paired session closes the old port and records host startup separately from readiness", async () => {
+  const previousSession = "123e4567-e89b-42d3-a456-426614174000";
+  const nextSession = "223e4567-e89b-42d3-a456-426614174000";
+  const stateKey = "weixin-channels-video:bridge-connection-state";
+  await withBackgroundHarness({
+    initialStorage: { "weixin-channels-video:bridge-session": previousSession },
+  }, async ({ onStartup, ports, storage, send }) => {
+    await onStartup.fire();
+    const previousPort = ports[0];
+    assert.deepEqual(previousPort.messages, [{ type: "hello", version: 1, sessionId: previousSession }]);
+
+    assert.deepEqual(await send({ type: "weixin-channels-video:pair", sessionId: nextSession }), { ok: true });
+    assert.equal(storage.get("weixin-channels-video:bridge-session"), nextSession);
+    assert.equal(previousPort.disconnects, 1);
+    assert.deepEqual(ports[1].messages, [{ type: "hello", version: 1, sessionId: nextSession }]);
+    assert.equal(storage.get(stateKey).stage, "host_starting", "pairing acknowledgment does not claim host readiness");
+
+    await ports[1].onMessage.fire({ type: "ready", version: 1 });
+    for (let attempt = 0; attempt < 20 && storage.get(stateKey)?.stage !== "host_ready"; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(storage.get(stateKey), { version: 1, stage: "host_ready" });
+  });
+});
+
+test("Native Messaging disconnect stores safe categories for Chrome's documented host errors", async () => {
+  const stateKey = "weixin-channels-video:bridge-connection-state";
+  const errors = [
+    ["Specified native messaging host not found. C:\\private\\manifest.json", "host_not_found"],
+    ["Native messaging host host name is not registered. (Windows-only)", "host_not_registered"],
+    ["Failed to start native messaging host.", "host_start_failed"],
+    ["Access to the specified native messaging host is forbidden.", "host_access_forbidden"],
+    ["Native host has exited.", "host_exited"],
+    ["Error when communicating with the native messaging host.", "host_communication_failed"],
+    ["Unrecognized runtime error with a private path", "host_disconnected"],
+  ];
+  for (const [message, reason] of errors) {
+    await withBackgroundHarness({}, async ({ onStartup, ports, storage, chromeApi }) => {
+      await chromeApi.storage.local.set({ "weixin-channels-video:bridge-session": "123e4567-e89b-42d3-a456-426614174000" });
+      await onStartup.fire();
+      chromeApi.runtime.lastError = { message };
+      await ports[0].onDisconnect.fire();
+      for (let attempt = 0; attempt < 20 && storage.get(stateKey)?.stage !== "failed"; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.deepEqual(storage.get(stateKey), { version: 1, stage: "failed", reason });
+      assert.equal(JSON.stringify(storage.get(stateKey)).includes("private"), false);
+    });
+  }
+});
+
 test("offscreen accepts only fixed background parse and pairing messages", async () => {
   const harness = createHiddenIframeHarness();
   const extensionId = "synthetic-extension-id";

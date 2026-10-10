@@ -1,10 +1,10 @@
 import { build } from 'esbuild';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { RUNTIME_PROTOCOL } from '../skills/weixin-channels-video/scripts/run.mjs';
+import { MIN_NODE_VERSION, RUNTIME_PROTOCOL } from '../skills/weixin-channels-video/scripts/runtime-support.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -50,16 +50,28 @@ await cp(join(skill, 'SKILL.md'), join(skillOutput, 'SKILL.md'));
 await cp(join(root, 'LICENSE'), join(skillOutput, 'LICENSE'));
 await cp(join(root, 'NOTICE.md'), join(skillOutput, 'NOTICE.md'));
 await cp(join(skill, 'scripts/run.mjs'), join(skillOutput, 'scripts/run.mjs'));
-await writeFile(join(skillOutput, 'runtime.json'), `${JSON.stringify({ version: manifest.version, runtimeProtocol: RUNTIME_PROTOCOL }, null, 2)}\n`);
+await cp(join(skill, 'scripts/runtime-support.mjs'), join(skillOutput, 'scripts/runtime-support.mjs'));
+await cp(join(skill, 'scripts/windows-security.mjs'), join(skillOutput, 'scripts/windows-security.mjs'));
+try {
+  await access(join(skill, 'references'));
+  await cp(join(skill, 'references'), join(skillOutput, 'references'), { recursive: true });
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
+await writeFile(join(skillOutput, 'runtime.json'), `${JSON.stringify({
+  version: manifest.version,
+  runtimeProtocol: RUNTIME_PROTOCOL,
+  minimumNodeVersion: MIN_NODE_VERSION,
+}, null, 2)}\n`);
 await build({
   entryPoints: [join(skill, 'scripts/cli.mjs')],
   outfile: join(skillOutput, 'scripts/cli.mjs'),
-  bundle: true, platform: 'node', format: 'esm', target: 'node24',
+  bundle: true, platform: 'node', format: 'esm', target: 'node22',
 });
 await build({
   entryPoints: [join(root, 'src/native-host.mjs')],
   outfile: join(skillOutput, 'scripts/native-host.mjs'),
-  bundle: true, platform: 'node', format: 'esm', target: 'node24',
+  bundle: true, platform: 'node', format: 'esm', target: 'node22',
 });
 await build({
   entryPoints: [join(extensionSource, 'background.mjs')],

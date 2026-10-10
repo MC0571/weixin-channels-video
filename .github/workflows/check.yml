@@ -18,4 +18,53 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run worker:build
-      - run: python3 -m unittest discover -s skills/weixin-channels-video/scripts -p 'test_*.py'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skill-runtime
+          path: dist/weixin-channels-video
+          if-no-files-found: error
+          retention-days: 1
+  runtime-node-minimum:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: skill-runtime
+          path: dist/weixin-channels-video
+      - name: Windows security context
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $path = Join-Path $env:RUNNER_TEMP ('wcv-owner-check-' + [Guid]::NewGuid().ToString('N'))
+          [void][System.IO.Directory]::CreateDirectory($path)
+          try {
+            $owner = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier])
+            Write-Output ('newDirectoryOwnerIsUser=' + ($owner.Value -eq $identity.User.Value))
+            Write-Output ('newDirectoryOwnerIsDefaultOwner=' + ($owner.Value -eq $identity.Owner.Value))
+            Write-Output ('windowsPowerShellVersion=' + $PSVersionTable.PSVersion.ToString())
+          } finally {
+            [System.IO.Directory]::Delete($path)
+          }
+      - run: node --test tests/skill-runtime.test.mjs
+      - run: node --test tests/skill-runtime-transaction.test.mjs
+      - run: node --test tests/windows-security.test.mjs tests/windows-bridge-install.test.mjs
+      - run: node dist/weixin-channels-video/scripts/run.mjs help
+      - run: |
+          node tests/skill-runtime-package-smoke.mjs
+        if: ${{ !cancelled() }}
+      - name: Native host protocol smoke
+        if: runner.os == 'macOS'
+        run: node tests/skill-runtime-host-smoke.mjs
+      - name: Windows native IPC smoke
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: node tests/native-ipc-windows-smoke.mjs
