@@ -19,6 +19,7 @@ import { dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { MIN_NODE_VERSION, RUNTIME_PROTOCOL, supportsNodeVersion } from "./runtime-support.mjs";
+import { assertWindowsPrivatePath, secureWindowsPath } from "./windows-security.mjs";
 
 export { MIN_NODE_VERSION, RUNTIME_PROTOCOL, supportsNodeVersion };
 
@@ -84,7 +85,43 @@ async function readRegularFile(path) {
   return readFile(path);
 }
 
-async function readRuntime(root, expectedVersion) {
+async function protectCacheDirectory(path) {
+  if (process.platform === "win32") {
+    await secureWindowsPath(path, { directory: true });
+  }
+}
+
+async function assertPrivateRuntime(root) {
+  if (process.platform !== "win32") return;
+  await assertWindowsPrivatePath(root, { directory: true });
+  await assertWindowsPrivatePath(join(root, "runtime.json"));
+  await assertWindowsPrivatePath(join(root, "scripts"), { directory: true });
+  await assertWindowsPrivatePath(join(root, "assets"), { directory: true });
+  await assertWindowsPrivatePath(join(root, "scripts", "cli.mjs"));
+  await assertWindowsPrivatePath(join(root, "scripts", "native-host.mjs"));
+  await assertWindowsPrivatePath(join(root, "assets", "extension"), { directory: true });
+}
+
+async function writeCacheFile(path, contents) {
+  if (process.platform === "win32") {
+    await writeFile(path, "", { flag: "wx", mode: 0o600 });
+    await secureWindowsPath(path);
+    await writeFile(path, contents);
+    return;
+  }
+  await writeFile(path, contents, { flag: "wx", mode: 0o600 });
+}
+
+async function copyCacheFile(source, destination) {
+  if (process.platform === "win32") {
+    await writeCacheFile(destination, await readRegularFile(source));
+    return;
+  }
+  await copyFile(source, destination, constants.COPYFILE_EXCL);
+}
+
+async function readRuntime(root, expectedVersion, { requirePrivate = false } = {}) {
+  if (requirePrivate) await assertPrivateRuntime(root);
   const metadata = JSON.parse((await readRegularFile(join(root, "runtime.json"))).toString("utf8"));
   if (
     !isRecord(metadata) || Object.keys(metadata).length !== 3 ||
@@ -330,14 +367,16 @@ export async function unpackSkillArchive(archiveBytes, destination) {
   const members = parseSkillArchive(archiveBytes);
   const destinationRoot = resolve(destination);
   await mkdir(destinationRoot, { recursive: false, mode: 0o700 });
+  await protectCacheDirectory(destinationRoot);
   for (const [path, member] of members) {
     const target = resolve(destinationRoot, ...path.split("/"));
     if (target !== destinationRoot && !target.startsWith(destinationRoot + sep)) fail("Skill TAR 包包含越界路径。");
     if (member.directory) {
       await mkdir(target, { recursive: false, mode: 0o700 });
+      await protectCacheDirectory(target);
     } else {
       await mkdir(dirname(target), { recursive: true, mode: 0o700 });
-      await writeFile(target, member.data, { flag: "wx", mode: 0o600 });
+      await writeCacheFile(target, member.data);
     }
   }
 }
@@ -353,9 +392,11 @@ async function ensureCacheRoot() {
   await mkdir(LEGACY_CACHE_ROOT, { recursive: true, mode: 0o700 });
   const legacyInfo = await lstat(LEGACY_CACHE_ROOT);
   if (!legacyInfo.isDirectory() || legacyInfo.isSymbolicLink()) fail("运行资源缓存目录不安全。");
+  await protectCacheDirectory(LEGACY_CACHE_ROOT);
   await mkdir(CACHE_ROOT, { recursive: true, mode: 0o700 });
   const info = await lstat(CACHE_ROOT);
   if (!info.isDirectory() || info.isSymbolicLink()) fail("运行资源缓存目录不安全。");
+  await protectCacheDirectory(CACHE_ROOT);
   if (process.platform === "darwin") {
     await chmod(LEGACY_CACHE_ROOT, 0o700);
     await chmod(CACHE_ROOT, 0o700);
@@ -371,7 +412,10 @@ async function inspectExtensionTree(root, copyTo) {
     if (info.isDirectory()) {
       files += 1;
       if (files > MAX_ARCHIVE_FILES) fail("扩展运行资源成员过多。");
-      if (destination) await mkdir(destination, { recursive: false, mode: 0o700 });
+      if (destination) {
+        await mkdir(destination, { recursive: false, mode: 0o700 });
+        await protectCacheDirectory(destination);
+      }
       for (const name of await readdir(source)) {
         if (!isPortableSegment(name)) fail("扩展运行资源路径无效。");
         await visit(join(source, name), destination ? join(destination, name) : undefined);
@@ -382,7 +426,7 @@ async function inspectExtensionTree(root, copyTo) {
     files += 1;
     totalBytes += info.size;
     if (files > MAX_ARCHIVE_FILES || totalBytes > MAX_UNPACKED_BYTES) fail("扩展运行资源超过允许大小。");
-    if (destination) await copyFile(source, destination, constants.COPYFILE_EXCL);
+    if (destination) await copyCacheFile(source, destination);
   }
   await visit(root, copyTo);
   const manifest = JSON.parse((await readRegularFile(join(root, "manifest.json"))).toString("utf8"));
@@ -396,10 +440,22 @@ function extensionLocationPath(location) {
   fail("扩展加载目录记录无效。");
 }
 
+async function assertPrivateExtensionLocation(location) {
+  if (process.platform !== "win32") return;
+  if (location === "extension") return;
+  const legacy = typeof location === "string" && location.match(/^legacy:(.+)$/);
+  if (!legacy || !parseVersion(legacy[1])) fail("扩展加载目录记录无效。");
+  const versionRoot = join(LEGACY_CACHE_ROOT, legacy[1]);
+  await assertWindowsPrivatePath(versionRoot, { directory: true });
+  await assertWindowsPrivatePath(join(versionRoot, "assets"), { directory: true });
+  await assertWindowsPrivatePath(join(versionRoot, "assets", "extension"), { directory: true });
+}
+
 async function readCurrentMarker({ missingOk = false } = {}) {
   const markerPath = join(CACHE_ROOT, "current.json");
   try {
     await assertRegularFile(markerPath);
+    if (process.platform === "win32") await assertWindowsPrivatePath(markerPath);
     const marker = JSON.parse(await readFile(markerPath, "utf8"));
     if (
       !isRecord(marker) || Object.keys(marker).length !== 3 ||
@@ -423,6 +479,7 @@ async function chooseExtensionLocation() {
   let legacyMarker;
   try {
     await assertRegularFile(legacyMarkerPath);
+    if (process.platform === "win32") await assertWindowsPrivatePath(legacyMarkerPath);
     legacyMarker = JSON.parse(await readFile(legacyMarkerPath, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT") return "extension";
@@ -433,6 +490,7 @@ async function chooseExtensionLocation() {
     fail("旧运行资源缓存无法安全迁移，请保留现有扩展并检查缓存标记。");
   }
   const legacyPath = join(LEGACY_CACHE_ROOT, legacyMarker.version, "assets", "extension");
+  await assertPrivateExtensionLocation("legacy:" + legacyMarker.version);
   const info = await lstat(legacyPath);
   if (!info.isDirectory() || info.isSymbolicLink()) fail("旧扩展加载目录无效，已保留现有资源。");
   const manifest = await inspectExtensionTree(legacyPath);
@@ -445,11 +503,11 @@ async function writeCurrentVersion(version, extensionLocation) {
   const markerPath = join(CACHE_ROOT, "current.json");
   const tempPath = join(CACHE_ROOT, ".current-" + randomUUID() + ".tmp");
   try {
-    await writeFile(tempPath, JSON.stringify({
+    await writeCacheFile(tempPath, Buffer.from(JSON.stringify({
       version,
       runtimeProtocol: RUNTIME_PROTOCOL,
       extensionLocation,
-    }) + "\n", { flag: "wx", mode: 0o600 });
+    }) + "\n"));
     if (process.platform === "darwin") await chmod(tempPath, 0o600);
     await rename(tempPath, markerPath);
   } finally {
@@ -461,6 +519,7 @@ async function replaceExtensionAssets(source, location, version) {
   const destination = extensionLocationPath(location);
   const sourcePath = resolve(source);
   const destinationPath = resolve(destination);
+  await assertPrivateExtensionLocation(location);
   const sourceManifest = await inspectExtensionTree(source);
   if (sourceManifest.version !== version) fail("扩展运行资源版本与 Skill 版本不一致。");
   if (sourcePath === destinationPath) {
@@ -473,6 +532,7 @@ async function replaceExtensionAssets(source, location, version) {
 
   if (destinationInfo) {
     if (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink()) fail("扩展加载目录无效，已保留现有资源。");
+    if (process.platform === "win32") await assertWindowsPrivatePath(destination, { directory: true });
     const currentManifest = await inspectExtensionTree(destination);
     if (currentManifest.key !== sourceManifest.key) {
       fail("新扩展会改变当前加载目录的扩展 ID，已保留现有资源。");
@@ -528,7 +588,7 @@ async function prepareFromRelease() {
     if (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink()) {
       fail("同版本运行资源缓存不是普通目录，已保留原数据。");
     }
-    runtime = await readRuntime(destination, version);
+    runtime = await readRuntime(destination, version, { requirePrivate: true });
   } else {
     const tag = "v" + version;
     const releaseBase = RELEASE_DOWNLOADS + "/" + tag;
@@ -551,10 +611,11 @@ async function prepareFromRelease() {
     await ensureCacheRoot();
     const stage = await mkdtemp(join(CACHE_ROOT, ".prepare-" + version + "-"));
     try {
+      await protectCacheDirectory(stage);
       const payload = join(stage, "payload");
       await unpackSkillArchive(archiveBytes, payload);
       const source = join(payload, "weixin-channels-video");
-      runtime = await readRuntime(source, version);
+      runtime = await readRuntime(source, version, { requirePrivate: true });
       await rename(source, destination);
       runtime = { ...runtime, runtimeCLI: join(destination, "scripts", "cli.mjs"), extensionAssets: join(destination, "assets", "extension") };
     } finally {
@@ -576,20 +637,23 @@ async function cachePackagedRuntime(runtime) {
     if (!destinationInfo.isDirectory() || destinationInfo.isSymbolicLink()) {
       fail("同版本运行资源缓存不是普通目录，已保留原数据。");
     }
-    return readRuntime(destination, runtime.version);
+    return readRuntime(destination, runtime.version, { requirePrivate: true });
   }
 
   const stage = await mkdtemp(join(CACHE_ROOT, ".package-" + runtime.version + "-"));
   try {
+    await protectCacheDirectory(stage);
     const scripts = join(stage, "scripts");
     const assets = join(stage, "assets");
     await mkdir(scripts, { mode: 0o700 });
+    await protectCacheDirectory(scripts);
     await mkdir(assets, { mode: 0o700 });
-    await copyFile(join(SKILL_ROOT, "runtime.json"), join(stage, "runtime.json"), constants.COPYFILE_EXCL);
-    await copyFile(runtime.runtimeCLI, join(scripts, "cli.mjs"), constants.COPYFILE_EXCL);
-    await copyFile(join(dirname(runtime.runtimeCLI), "native-host.mjs"), join(scripts, "native-host.mjs"), constants.COPYFILE_EXCL);
+    await protectCacheDirectory(assets);
+    await copyCacheFile(join(SKILL_ROOT, "runtime.json"), join(stage, "runtime.json"));
+    await copyCacheFile(runtime.runtimeCLI, join(scripts, "cli.mjs"));
+    await copyCacheFile(join(dirname(runtime.runtimeCLI), "native-host.mjs"), join(scripts, "native-host.mjs"));
     await inspectExtensionTree(runtime.extensionAssets, join(assets, "extension"));
-    await readRuntime(stage, runtime.version);
+    await readRuntime(stage, runtime.version, { requirePrivate: true });
 
     try {
       await rename(stage, destination);
@@ -599,7 +663,7 @@ async function cachePackagedRuntime(runtime) {
       catch { throw error; }
       if (!existing.isDirectory() || existing.isSymbolicLink()) throw error;
     }
-    return readRuntime(destination, runtime.version);
+    return readRuntime(destination, runtime.version, { requirePrivate: true });
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
@@ -649,7 +713,7 @@ async function currentRuntime() {
   const runtimeRoot = join(CACHE_ROOT, marker.version);
   const runtimeInfo = await lstat(runtimeRoot);
   if (!runtimeInfo.isDirectory() || runtimeInfo.isSymbolicLink()) fail("当前运行资源缓存目录无效。");
-  const runtime = await readRuntime(runtimeRoot, marker.version);
+  const runtime = await readRuntime(runtimeRoot, marker.version, { requirePrivate: true });
   const extension = await replaceExtensionAssets(runtime.extensionAssets, marker.extensionLocation, marker.version);
   if (extension.changed) {
     try { await writeCurrentVersion(marker.version, marker.extensionLocation); }

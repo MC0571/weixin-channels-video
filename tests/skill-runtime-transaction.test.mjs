@@ -5,8 +5,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { skillArchive } from './fixtures/skill-archive.mjs';
+import { assertWindowsPrivatePath, secureWindowsPath } from '../skills/weixin-channels-video/scripts/windows-security.mjs';
 
 const supportedPlatform = process.platform === 'darwin' || process.platform === 'win32';
+
+async function assertPrivateTree(path) {
+  if (process.platform !== 'win32') return;
+  await assertWindowsPrivatePath(path, { directory: true });
+  for (const name of await readdir(path)) {
+    const child = join(path, name);
+    const info = await lstat(child);
+    if (info.isDirectory()) await assertPrivateTree(child);
+    else await assertWindowsPrivatePath(child);
+  }
+}
 
 function makeRelease(version, runtimeProtocol = 2, corruptChecksum = false) {
   const archiveName = 'weixin-channels-video-skill-v' + version + '.tar.gz';
@@ -83,6 +95,16 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
       version: '0.1.1',
       runtimeProtocol: 1,
     }));
+    if (process.platform === 'win32') {
+      for (const directory of [
+        legacyRoot,
+        join(legacyRoot, '0.1.1'),
+        join(legacyRoot, '0.1.1', 'assets'),
+        oldExtension,
+      ]) await secureWindowsPath(directory, { directory: true });
+      await secureWindowsPath(join(oldExtension, 'manifest.json'));
+      await secureWindowsPath(join(legacyRoot, 'current.json'));
+    }
 
     let activeRelease = makeRelease('0.2.0');
     const releasesApi = 'https://api.github.com/repos/MC0571/weixin-channels-video/releases/latest';
@@ -130,6 +152,10 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
       extensionLocation: 'legacy:0.1.1',
     });
     await assertCommitted('0.2.0', committedMarker);
+    if (process.platform === 'win32') {
+      await assertPrivateTree(cacheRoot);
+      await assertPrivateTree(oldExtension);
+    }
 
     activeRelease = makeRelease('0.3.0', 2, true);
     await assert.rejects(prepare(), /SHA256/);

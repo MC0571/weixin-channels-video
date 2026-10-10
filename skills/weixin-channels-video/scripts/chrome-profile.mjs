@@ -1,10 +1,14 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, win32 } from 'node:path';
 
-export function defaultChromeUserDataDir() {
-  if (process.platform !== 'darwin') throw new Error('Chrome profile access currently supports macOS only.');
-  return join(homedir(), 'Library/Application Support/Google/Chrome');
+export function defaultChromeUserDataDir({ platform = process.platform, home = homedir(), env = process.env } = {}) {
+  if (platform === 'win32') {
+    if (!env.LOCALAPPDATA) throw new Error('Chrome profile metadata is unavailable or invalid.');
+    return win32.join(env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data');
+  }
+  if (platform !== 'darwin') throw new Error('Chrome profile access currently supports macOS and Windows.');
+  return join(home, 'Library', 'Application Support', 'Google', 'Chrome');
 }
 
 export async function listChromeProfiles(userDataDir = defaultChromeUserDataDir()) {

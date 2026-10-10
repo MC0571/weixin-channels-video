@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { startNativeHost } from "../dist/weixin-channels-video/scripts/native-host.mjs";
+import { secureWindowsPath } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
 
 const extensionId = "a".repeat(32);
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
@@ -46,10 +47,23 @@ try {
   await writeFile(configPath, JSON.stringify({
     version: 1,
     hostName: "com.mc0571.weixin_channels_video",
+    platform: process.platform,
+    ipcProtocol: 2,
     extensionId,
     appSupportDir: root,
   }));
-  await writeFile(join(root, "session.json"), JSON.stringify({ version: 1, sessionId }));
+  const sessionPath = join(root, "session.json");
+  await writeFile(sessionPath, JSON.stringify({
+    version: 1,
+    sessionId,
+    ipcProtocol: 2,
+    ipcSecret: "a".repeat(64),
+  }));
+  if (process.platform === "win32") {
+    await secureWindowsPath(root, { directory: true });
+    await secureWindowsPath(configPath);
+    await secureWindowsPath(sessionPath);
+  }
   host = await startNativeHost({
     configPath,
     extensionOrigin: "chrome-extension://" + extensionId + "/",

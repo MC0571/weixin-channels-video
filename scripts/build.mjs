@@ -51,6 +51,7 @@ await cp(join(root, 'LICENSE'), join(skillOutput, 'LICENSE'));
 await cp(join(root, 'NOTICE.md'), join(skillOutput, 'NOTICE.md'));
 await cp(join(skill, 'scripts/run.mjs'), join(skillOutput, 'scripts/run.mjs'));
 await cp(join(skill, 'scripts/runtime-support.mjs'), join(skillOutput, 'scripts/runtime-support.mjs'));
+await cp(join(skill, 'scripts/windows-security.mjs'), join(skillOutput, 'scripts/windows-security.mjs'));
 try {
   await access(join(skill, 'references'));
   await cp(join(skill, 'references'), join(skillOutput, 'references'), { recursive: true });

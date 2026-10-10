@@ -16,6 +16,7 @@ const FEED_REQUEST_ID_PATTERN = /^[0-9a-f]{1,16}-[0-9a-f]{8}$/;
 const FAILURE_RESULT = { status: 0, body: "", failure: "failed" };
 const PAIRING_STORAGE_KEY = "weixin-channels-video:bridge-session";
 const RETRY_COUNT_STORAGE_KEY = "weixin-channels-video:bridge-retry-count";
+const CONNECTION_STATE_STORAGE_KEY = "weixin-channels-video:bridge-connection-state";
 const RECONNECT_ALARM = "weixin-channels-video:bridge-reconnect";
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAYS_MINUTES = [1, 2, 4, 8, 15];
@@ -273,7 +274,30 @@ let pairingQueue = Promise.resolve();
 let restoreInProgress;
 let nativeConnection;
 let nativeRequestQueue = Promise.resolve();
+let nativeConnectionStateQueue = Promise.resolve();
 let requestedPairing;
+
+function setNativeConnectionState(stage, reason) {
+  const state = {
+    version: 1,
+    stage,
+    ...(reason ? { reason } : {}),
+  };
+  nativeConnectionStateQueue = nativeConnectionStateQueue.then(() =>
+    chrome.storage.local.set({ [CONNECTION_STATE_STORAGE_KEY]: state })
+  ).catch(() => {});
+}
+
+function classifyNativeDisconnect(message) {
+  if (typeof message !== "string") return "host_disconnected";
+  if (/specified native messaging host not found/i.test(message)) return "host_not_found";
+  if (/native messaging host.*is not registered/i.test(message)) return "host_not_registered";
+  if (/failed to start native messaging host/i.test(message)) return "host_start_failed";
+  if (/access to the specified native messaging host is forbidden/i.test(message)) return "host_access_forbidden";
+  if (/native host has exited/i.test(message)) return "host_exited";
+  if (/error when communicating with the native messaging host/i.test(message)) return "host_communication_failed";
+  return "host_disconnected";
+}
 
 async function scheduleReconnect(resetRetries = false) {
   return enqueuePairing(async () => {
@@ -297,16 +321,20 @@ async function scheduleReconnect(resetRetries = false) {
   });
 }
 
-function disconnectNative(connection) {
+function disconnectNative(connection, reason = "invalid_host_message") {
   if (nativeConnection !== connection) return;
   nativeConnection = undefined;
+  setNativeConnectionState("failed", reason);
   try { connection.port.disconnect(); }
   catch { /* A disconnected Native Messaging port has no further work to do. */ }
   void scheduleReconnect(connection.ready);
 }
 
 function connectNative(sessionId) {
-  if (nativeConnection?.sessionId === sessionId) return;
+  if (nativeConnection?.sessionId === sessionId) {
+    setNativeConnectionState(nativeConnection.ready ? "host_ready" : "host_starting");
+    return;
+  }
   if (nativeConnection) {
     const previous = nativeConnection;
     nativeConnection = undefined;
@@ -316,38 +344,42 @@ function connectNative(sessionId) {
   let port;
   try { port = chrome.runtime.connectNative(NATIVE_HOST_NAME); }
   catch {
+    setNativeConnectionState("failed", "connect_native_failed");
     void scheduleReconnect();
     return;
   }
+  setNativeConnectionState("host_starting");
   const connection = { port, sessionId, ready: false };
   nativeConnection = connection;
   port.onMessage.addListener((message) => {
     if (nativeConnection !== connection) return;
     if (message?.type === "ready") {
       if (!hasExactKeys(message, ["type", "version"]) || message.version !== 1) {
-        disconnectNative(connection);
+        disconnectNative(connection, "invalid_ready_message");
         return;
       }
       connection.ready = true;
+      setNativeConnectionState("host_ready");
       return;
     }
     if (!connection.ready || !validateBridgeCommand(message)) {
-      disconnectNative(connection);
+      disconnectNative(connection, "invalid_host_message");
       return;
     }
     nativeRequestQueue = nativeRequestQueue.then(async () => {
       if (nativeConnection !== connection) return;
       const response = await handleAgentCommand(message);
       if (nativeConnection === connection) connection.port.postMessage(response);
-    }).catch(() => disconnectNative(connection));
+    }).catch(() => disconnectNative(connection, "host_communication_failed"));
   });
   port.onDisconnect.addListener(() => {
     if (nativeConnection !== connection) return;
     nativeConnection = undefined;
+    setNativeConnectionState("failed", classifyNativeDisconnect(chrome.runtime.lastError?.message));
     return scheduleReconnect(connection.ready);
   });
   try { port.postMessage({ type: "hello", version: 1, sessionId }); }
-  catch { disconnectNative(connection); }
+  catch { disconnectNative(connection, "host_communication_failed"); }
 }
 
 function workerRequestFactory() {
@@ -437,6 +469,7 @@ async function pairSession(sessionId) {
         [PAIRING_STORAGE_KEY]: pairedSession,
         [RETRY_COUNT_STORAGE_KEY]: 0,
       });
+      setNativeConnectionState("pairing_saved");
       await chrome.alarms.clear(RECONNECT_ALARM);
       connectNative(pairedSession);
     });

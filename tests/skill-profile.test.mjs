@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { listChromeProfiles, selectChromeProfile } from '../skills/weixin-channels-video/scripts/chrome-profile.mjs';
+import { defaultChromeUserDataDir, listChromeProfiles, selectChromeProfile } from '../skills/weixin-channels-video/scripts/chrome-profile.mjs';
 
 async function fixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'weixin-profile-test-'));
@@ -39,4 +39,13 @@ test('profile listing and selection use metadata without reading cookie database
     });
     assert.equal((await selectChromeProfile('Default', root)).directory, 'Default');
   });
+});
+
+test('default Chrome profile paths follow each supported platform', () => {
+  assert.equal(defaultChromeUserDataDir({ platform: 'darwin', home: '/Users/example' }),
+    '/Users/example/Library/Application Support/Google/Chrome');
+  assert.equal(defaultChromeUserDataDir({
+    platform: 'win32',
+    env: { LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local' },
+  }), 'C:\\Users\\example\\AppData\\Local\\Google\\Chrome\\User Data');
 });

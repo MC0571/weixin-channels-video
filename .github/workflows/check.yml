@@ -41,9 +41,13 @@ jobs:
           path: dist/weixin-channels-video
       - run: node --test tests/skill-runtime.test.mjs
       - run: node --test tests/skill-runtime-transaction.test.mjs
+      - run: node --test tests/windows-security.test.mjs tests/windows-bridge-install.test.mjs
       - run: node dist/weixin-channels-video/scripts/run.mjs help
       - run: |
           node tests/skill-runtime-package-smoke.mjs
       - name: Native host protocol smoke
         if: runner.os == 'macOS'
         run: node tests/skill-runtime-host-smoke.mjs
+      - name: Windows native IPC smoke
+        if: runner.os == 'Windows'
+        run: node tests/native-ipc-windows-smoke.mjs

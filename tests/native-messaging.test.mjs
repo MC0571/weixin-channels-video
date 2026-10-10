@@ -9,16 +9,20 @@ import { connect, createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { createAgentCommandHandler } from "../extension/agent.mjs";
-import { BRIDGE_ERROR_MESSAGES, BridgeFrameDecoder, encodeBridgeFrame, isSafeRelativeMp4Filename, NATIVE_HOST_NAME, validateBridgeCommand, validateBridgeResponse } from "../src/native-messaging.mjs";
+import { BRIDGE_ERROR_MESSAGES, BridgeFrameDecoder, encodeBridgeFrame, isAbsoluteDownloadPath, isSafeRelativeMp4Filename, NATIVE_HOST_NAME, validateBridgeCommand, validateBridgeResponse } from "../src/native-messaging.mjs";
+import { createIpcNonce, createIpcProof, createWindowsPipeServer, isIpcSession, verifyIpcProof, windowsPipeName } from "../src/native-ipc.mjs";
 import { startNativeHost } from "../src/native-host.mjs";
 import { bridgeSocketPath, installBridge, inspectBridgeComponents, readBridgeInstallation, readBridgeSession } from "../skills/weixin-channels-video/scripts/bridge-install.mjs";
 import { BridgeError, requestBridge, waitForBridge } from "../skills/weixin-channels-video/scripts/bridge-client.mjs";
 import { runCli } from "../skills/weixin-channels-video/scripts/cli.mjs";
+import { secureWindowsPath } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
 
 const EXTENSION_ID = "a".repeat(32);
 const SESSION_1 = "123e4567-e89b-42d3-a456-426614174000";
 const SESSION_2 = "223e4567-e89b-42d3-a456-426614174000";
 const REQUEST_ID = "323e4567-e89b-42d3-a456-426614174000";
+const IPC_SECRET = "a".repeat(64);
+const SESSION_INFO = { sessionId: SESSION_1, ipcProtocol: 2, ipcSecret: IPC_SECRET };
 
 async function withTempDir(callback) {
   const root = await mkdtemp(join(tmpdir(), "weixin-native-bridge-test-"));
@@ -68,6 +72,35 @@ function collectFrames(stream) {
   };
 }
 
+function createAuthenticatedFakeServer({ sessionInfo = SESSION_INFO, hostSecret = sessionInfo.ipcSecret, hostNonce = "b".repeat(64), onTask = () => {} } = {}) {
+  return createServer((socket) => {
+    const decoder = new BridgeFrameDecoder();
+    let phase = "hello";
+    let clientNonce;
+    socket.on("data", (chunk) => {
+      for (const message of decoder.push(chunk)) {
+        if (phase === "hello") {
+          phase = "proof";
+          clientNonce = message.nonce;
+          socket.write(Buffer.from(encodeBridgeFrame({
+            type: "challenge", version: 2, nonce: hostNonce,
+          })));
+        } else if (phase === "proof") {
+          phase = "task";
+          socket.write(Buffer.from(encodeBridgeFrame({
+            type: "proof",
+            version: 2,
+            role: "host",
+            proof: createIpcProof(hostSecret, "host", clientNonce, hostNonce),
+          })));
+        } else {
+          onTask(message.request, socket);
+        }
+      }
+    });
+  });
+}
+
 async function createHostFixture(root, sessionId = SESSION_1) {
   const appSupportDir = join(root, "app");
   await mkdir(appSupportDir, { recursive: true, mode: 0o700 });
@@ -76,10 +109,17 @@ async function createHostFixture(root, sessionId = SESSION_1) {
   await writeFile(configPath, JSON.stringify({
     version: 1,
     hostName: NATIVE_HOST_NAME,
+    platform: process.platform,
+    ipcProtocol: 2,
     extensionId: EXTENSION_ID,
     appSupportDir,
   }), { mode: 0o600 });
-  await writeFile(join(appSupportDir, "session.json"), JSON.stringify({ version: 1, sessionId }), { mode: 0o600 });
+  await writeFile(join(appSupportDir, "session.json"), JSON.stringify({ version: 1, sessionId, ipcProtocol: 2, ipcSecret: IPC_SECRET }), { mode: 0o600 });
+  if (process.platform === "win32") {
+    await secureWindowsPath(appSupportDir, { directory: true });
+    await secureWindowsPath(configPath);
+    await secureWindowsPath(join(appSupportDir, "session.json"));
+  }
   const input = new PassThrough();
   const output = new PassThrough();
   const outputFrames = collectFrames(output);
@@ -89,7 +129,7 @@ async function createHostFixture(root, sessionId = SESSION_1) {
     input,
     output,
   });
-  return { appSupportDir, configPath, host, input, output, outputFrames };
+  return { appSupportDir, configPath, config: { platform: process.platform, appSupportDir }, host, input, output, outputFrames, sessionInfo: { sessionId, ipcProtocol: 2, ipcSecret: IPC_SECRET } };
 }
 
 test("Native Messaging frames handle partial input and reject malformed or oversized frames", () => {
@@ -113,7 +153,100 @@ test("Native Messaging frames handle partial input and reject malformed or overs
   assert.throws(() => new BridgeFrameDecoder().push(Buffer.from([1, 0, 0, 0, 0xff])), /encoded data/);
 });
 
+test("IPC2 sessions use private keys, fresh nonces, and endpoint-specific pipe names", () => {
+  const clientNonce = createIpcNonce();
+  const hostNonce = createIpcNonce();
+  const proof = createIpcProof(IPC_SECRET, "client", clientNonce, hostNonce);
+  assert.equal(isIpcSession(SESSION_INFO), true);
+  assert.equal(isIpcSession({ ...SESSION_INFO, extra: true }), false);
+  assert.equal(verifyIpcProof(proof, proof), true);
+  assert.equal(verifyIpcProof(proof, "0".repeat(64)), false);
+  assert.notEqual(windowsPipeName("C:\\Users\\Example\\AppData", SESSION_1), windowsPipeName("C:\\Users\\Example\\AppData", SESSION_2));
+  assert.notEqual(windowsPipeName("C:\\Users\\Example\\AppData", SESSION_1), windowsPipeName("C:\\Users\\Other\\AppData", SESSION_1));
+});
+
+test("Windows pipe transport close waits for PowerShell exit and settles startup", async () => {
+  class FakeChild extends EventEmitter {
+    constructor() {
+      super();
+      this.stdin = new PassThrough();
+      this.stdout = new PassThrough();
+      this.stderr = new PassThrough();
+      this.exitCode = null;
+      this.signalCode = null;
+      this.killed = false;
+    }
+    kill() {
+      this.killed = true;
+      setTimeout(() => {
+        this.exitCode = 1;
+        this.emit("exit", 1, null);
+        this.emit("close", 1, null);
+      }, 20);
+      return true;
+    }
+  }
+  let child;
+  let unexpectedFatal = false;
+  const transport = createWindowsPipeServer(`weixin-channels-video-${"a".repeat(32)}`, {
+    platform: "win32",
+    env: { SystemRoot: "C:\\Windows" },
+    spawnImpl: () => (child = new FakeChild()),
+    onFatal: () => { unexpectedFatal = true; },
+  });
+  const ready = assert.rejects(transport.ready, /WINDOWS_PIPE_START_FAILED/);
+  let closed = false;
+  const closing = transport.close().then(() => { closed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(child.killed, true);
+  assert.equal(closed, false);
+  await Promise.all([ready, closing]);
+  assert.equal(closed, true);
+  assert.equal(unexpectedFatal, false);
+});
+
+test("Windows pipe transport reports an unexpected PowerShell exit after READY", async () => {
+  class FakeChild extends EventEmitter {
+    constructor() {
+      super();
+      this.stdin = new PassThrough();
+      this.stdout = new PassThrough();
+      this.stderr = new PassThrough();
+      this.exitCode = null;
+      this.signalCode = null;
+      this.killed = false;
+    }
+    kill() { this.killed = true; return true; }
+  }
+  let child;
+  let fatalCount = 0;
+  const transport = createWindowsPipeServer(`weixin-channels-video-${"b".repeat(32)}`, {
+    platform: "win32",
+    env: { SystemRoot: "C:\\Windows" },
+    spawnImpl: () => (child = new FakeChild()),
+    onFatal: () => { fatalCount += 1; },
+  });
+  child.stderr.write("READY\r\n");
+  await transport.ready;
+  child.exitCode = 1;
+  child.emit("exit", 1, null);
+  child.emit("close", 1, null);
+  assert.equal(fatalCount, 1);
+  await transport.close();
+});
+
 test("bridge commands and download paths are narrow and exact", () => {
+  assert.equal(isAbsoluteDownloadPath("/Users/example/clip.mp4"), true);
+  assert.equal(isAbsoluteDownloadPath("C:\\Users\\example\\clip.mp4"), true);
+  assert.equal(isAbsoluteDownloadPath("C:/Users/example/clip.mp4"), true);
+  assert.equal(isAbsoluteDownloadPath("\\\\server\\share\\clip.mp4"), true);
+  assert.equal(isAbsoluteDownloadPath("//server/share/clip.mp4"), true);
+  assert.equal(isAbsoluteDownloadPath("C:clip.mp4"), false);
+  assert.equal(isAbsoluteDownloadPath("\\clip.mp4"), false);
+  assert.equal(isAbsoluteDownloadPath("\\\\server"), false);
+  assert.equal(isAbsoluteDownloadPath("\\\\server\\"), false);
+  assert.equal(isAbsoluteDownloadPath("\\\\?\\C:\\clip.mp4"), false);
+  assert.equal(isAbsoluteDownloadPath("clips/clip.mp4"), false);
   assert.equal(validateBridgeCommand({ id: REQUEST_ID, command: "status" }), true);
   assert.equal(validateBridgeCommand({ id: REQUEST_ID, command: "parse", url: "https://weixin.qq.com/sph/demo" }), true);
   assert.equal(validateBridgeCommand({ id: REQUEST_ID, command: "download", url: "https://weixin.qq.com/sph/demo", filename: "Clips/demo.mp4" }), true);
@@ -188,9 +321,11 @@ test("installer uses profile metadata only and writes private, exact user-level 
     assert.deepEqual(await inspectBridgeComponents(installed.config, { registryDir }), {
       registration: "valid",
       host: "present",
-      launcher: "invalid",
+      launcher: "valid",
       node: "missing",
+      nodeVersion: null,
       session: "available",
+      security: "unknown",
     });
 
     const sessionPath = join(appSupportDir, "session.json");
@@ -209,7 +344,7 @@ test("installer uses profile metadata only and writes private, exact user-level 
       nativeHostSource,
     });
     assert.equal(updated.profile.directory, "Profile 3");
-    assert.equal(await readBridgeSession(updated.config), sessionId);
+    assert.notEqual(await readBridgeSession(updated.config), sessionId);
     const reconfigured = await installBridge({
       extensionId: "b".repeat(32),
       profile: "Profile 3",
@@ -287,22 +422,18 @@ test("Native Messaging host binds the socket to one extension origin and one ses
   });
 });
 
-test("Native Messaging host forwards one framed command and cleans its socket on disconnect", async () => {
+test("Native Messaging host authenticates the local client, forwards one command, and cleans up", async () => {
   await withShortTempDir(async (root) => {
     const fixture = await createHostFixture(root);
     fixture.input.write(Buffer.from(encodeBridgeFrame({ type: "hello", version: 1, sessionId: SESSION_1 })));
     assert.deepEqual(await fixture.outputFrames.next(), { type: "ready", version: 1 });
 
-    const socket = connect(fixture.host.socketPath);
-    const socketFrames = collectFrames(socket);
-    assert.deepEqual(await socketFrames.next(), { type: "ready", sessionId: SESSION_1 });
     const command = { id: REQUEST_ID, command: "parse", url: "https://weixin.qq.com/sph/synthetic" };
-    socket.write(Buffer.from(encodeBridgeFrame({ sessionId: SESSION_1, request: command })));
+    const responsePromise = requestBridge(fixture.config, fixture.sessionInfo, command);
     assert.deepEqual(await fixture.outputFrames.next(), command);
     const response = { id: REQUEST_ID, ok: true, result: { title: "synthetic" } };
     fixture.input.write(Buffer.from(encodeBridgeFrame(response)));
-    assert.deepEqual(await socketFrames.next(), response);
-    socket.destroy();
+    assert.deepEqual(await responsePromise, response.result);
     await fixture.host.close();
     await assert.rejects(stat(fixture.host.socketPath), { code: "ENOENT" });
   });
@@ -332,7 +463,7 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   assert.equal(await runCli(["status"], {
     stdout: (value) => outputs.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     bridgeRequest: async () => { throw new BridgeError("LOGIN_CHECK_FAILED", "ignored"); },
   }), 1);
   assert.deepEqual(JSON.parse(outputs.pop()), { configuration: "configured", connection: "connected", login: "failed:LOGIN_CHECK_FAILED" });
@@ -340,7 +471,7 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   assert.equal(await runCli(["status"], {
     stdout: (value) => outputs.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     bridgeRequest: async () => { throw new BridgeError("BRIDGE_BUSY", "ignored"); },
   }), 1);
   assert.deepEqual(JSON.parse(outputs.pop()), { configuration: "configured", connection: "failed:BRIDGE_BUSY", login: "not_checked" });
@@ -348,22 +479,22 @@ test("CLI connection sessions stay private and status distinguishes disconnected
   assert.equal(await runCli(["connect"], {
     stdout: (value) => outputs.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     launch: async (bridgeConfig, pairedSession) => {
       launched ??= bridgeConfig;
       assert.equal(bridgeConfig, config);
       if (launches.length === 0) assert.equal(pairedSession, undefined);
-      else assert.equal(pairedSession, SESSION_1);
+      else assert.equal(pairedSession, SESSION_INFO.sessionId);
       launches.push(pairedSession);
     },
-    bridgeWait: async (_config, sessionId, options) => {
+    bridgeWait: async (_config, sessionInfo, options) => {
       waitTimeouts.push(options.timeoutMs);
-      if (waitTimeouts.length < 3) { waited ??= sessionId; throw new BridgeError("BRIDGE_TIMEOUT", "ignored"); }
+      if (waitTimeouts.length < 3) { waited ??= sessionInfo; throw new BridgeError("BRIDGE_TIMEOUT", "ignored"); }
     },
   }), 0);
   assert.equal(launched, config);
-  assert.equal(waited, SESSION_1);
-  assert.deepEqual(launches, [undefined, SESSION_1]);
+  assert.deepEqual(waited, SESSION_INFO);
+  assert.deepEqual(launches, [undefined, SESSION_INFO.sessionId]);
   assert.deepEqual(waitTimeouts, [500, 5_000, 30_000]);
   assert.equal(outputs.pop(), "Connected to the Chrome extension.");
   assert.equal(errors.length, 0);
@@ -380,7 +511,7 @@ test("CLI parse passes only the fixed command shape and never logs the share URL
     stdout: (value) => outputs.push(value),
     stderr: (value) => errors.push(value),
     readInstallation: async () => ({ appSupportDir: "/tmp/bridge" }),
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     bridgeWait: async () => {},
     bridgeRequest: async (_config, _session, request, options) => {
       sent = { request, options };
@@ -411,7 +542,7 @@ test("CLI auto-connects before a download and never retries a task after timeout
   const exitCode = await runCli(["download", "--url", "https://weixin.qq.com/sph/synthetic"], {
     stderr: (value) => errors.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     launch: async (_config, bootstrapSession) => launches.push(bootstrapSession),
     bridgeWait: async () => {
       bridgeWaitCount += 1;
@@ -516,24 +647,16 @@ test("CLI bridge request clears listeners and never retries after a timeout", as
     const config = { appSupportDir: root };
     const { bridgeSocketPath } = await import("../skills/weixin-channels-video/scripts/bridge-install.mjs");
     const path = bridgeSocketPath(config, sessionId);
-    const server = (await import("node:net")).createServer((client) => {
-      client.write(Buffer.from(encodeBridgeFrame({ type: "ready", sessionId })));
-      const decoder = new BridgeFrameDecoder();
-      client.on("data", (chunk) => {
-        const [envelope] = decoder.push(chunk);
-        if (envelope) setTimeout(() => client.write(Buffer.from(encodeBridgeFrame({
-          id: envelope.request.id,
-          ok: true,
-          result: { title: "late" },
-        }))), 100);
-      });
-    });
+    const server = createAuthenticatedFakeServer({ onTask: (request, client) => setTimeout(() => client.write(Buffer.from(encodeBridgeFrame({
+      type: "result", version: 2,
+      response: { id: request.id, ok: true, result: { title: "late" } },
+    }))), 100) });
     await mkdir(root, { recursive: true });
     await new Promise((resolve) => server.listen(path, resolve));
     let connectCount = 0;
     let socket;
     const request = { id: REQUEST_ID, command: "parse", url: "https://weixin.qq.com/sph/demo" };
-    await assert.rejects(requestBridge(config, sessionId, request, {
+    await assert.rejects(requestBridge(config, SESSION_INFO, request, {
       timeoutMs: 20,
       connectImpl: (...args) => {
         connectCount += 1;
@@ -561,7 +684,7 @@ test("socket access failures stay distinct from disconnected bridge status and r
 
   for (const code of ["ENOENT", "ECONNREFUSED", "ECONNRESET"]) {
     const error = Object.assign(new Error(`${code} private socket path`), { code });
-    await assert.rejects(requestBridge(config, SESSION_1, { id: REQUEST_ID, command: "status" }, {
+    await assert.rejects(requestBridge(config, SESSION_INFO, { id: REQUEST_ID, command: "status" }, {
       connectImpl: () => socketFor(error),
     }), (failure) => failure instanceof BridgeError &&
       failure.code === "BRIDGE_DISCONNECTED" &&
@@ -574,10 +697,10 @@ test("socket access failures stay distinct from disconnected bridge status and r
     stdout: (value) => stdout.push(value),
     stderr: (value) => stderr.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
-    bridgeRequest: (bridgeConfig, sessionId, request, options) => requestBridge(
+    readSession: async () => SESSION_INFO,
+    bridgeRequest: (bridgeConfig, sessionInfo, request, options) => requestBridge(
       bridgeConfig,
-      sessionId,
+      sessionInfo,
       request,
       { ...options, connectImpl: () => socketFor(rawError) },
     ),
@@ -597,7 +720,7 @@ test("socket access failures stay distinct from disconnected bridge status and r
   const connectStatus = await runCli(["connect"], {
     stderr: (value) => connectErrors.push(value),
     readInstallation: async () => config,
-    readSession: async () => SESSION_1,
+    readSession: async () => SESSION_INFO,
     bridgeWait: async () => { throw new BridgeError("BRIDGE_CONNECTION_FAILED", rawError.message); },
   });
   assert.equal(connectStatus, 1);
@@ -605,13 +728,11 @@ test("socket access failures stay distinct from disconnected bridge status and r
   assert.equal(connectErrors[0].includes("EACCES"), false);
 });
 
-test("waitForBridge preserves wrong-session protocol errors and connect does not rotate the session", async () => {
+test("waitForBridge rejects a mismatched IPC secret and connect does not rotate the session", async () => {
   await withShortTempDir(async (root) => {
     const config = { appSupportDir: root };
     const socketPath = bridgeSocketPath(config, SESSION_1);
-    const server = createServer((socket) => {
-      socket.write(Buffer.from(encodeBridgeFrame({ type: "ready", sessionId: SESSION_2 })));
-    });
+    const server = createAuthenticatedFakeServer({ hostSecret: "c".repeat(64) });
     await new Promise((resolve) => server.listen(socketPath, resolve));
 
     const errors = [];
@@ -619,8 +740,8 @@ test("waitForBridge preserves wrong-session protocol errors and connect does not
     const exitCode = await runCli(["connect"], {
       stderr: (value) => errors.push(value),
       readInstallation: async () => config,
-      readSession: async () => SESSION_1,
-      bridgeWait: (bridgeConfig, sessionId, options) => waitForBridge(bridgeConfig, sessionId, {
+      readSession: async () => SESSION_INFO,
+      bridgeWait: (bridgeConfig, sessionInfo, options) => waitForBridge(bridgeConfig, sessionInfo, {
         ...options,
         timeoutMs: 250,
       }),
