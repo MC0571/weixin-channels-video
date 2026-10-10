@@ -199,6 +199,9 @@ test("Windows bridge install keeps Unicode and spaces in long paths and stages f
       assert.ok(launcher.includes(`${moduleName}.psd1`));
     }
     assert.match(launcher, /--parent-window=/);
+    assert.match(launcher, /\$process\.RedirectStandardError=\$true/);
+    assert.match(launcher, /\$child\.StandardError\.BaseStream\.CopyToAsync\(\[Console\]::OpenStandardError\(\)\)/);
+    assert.doesNotMatch(launcher, /RedirectStandardInput|RedirectStandardOutput/);
     assert.match(launcher, /WCV_PARENT_WINDOW=%~2/);
     assert.match(launcher, /WCV_PARENT_WINDOW_VALUE=%~3/);
     const commandLine = launcher.split("\r\n").find((line) => line.includes("powershell.exe"));
@@ -412,6 +415,7 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
     await writeFile(nativeHostSource, [
       "import { writeFileSync } from 'node:fs';",
       "writeFileSync(process.env.WCV_CAPTURE, JSON.stringify(process.argv.slice(2)));",
+      "process.stderr.write('WCV_FIXED_STDERR\\n');",
       "process.stdin.pipe(process.stdout);",
       "",
     ].join("\n"));
@@ -448,6 +452,7 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
       });
       assert.equal(child.status, 0, "WINDOWS_LAUNCHER_EXITED_NONZERO");
       assert.deepEqual(child.stdout, input);
+      assert.deepEqual(child.stderr, Buffer.from("WCV_FIXED_STDERR\n"));
       assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
         config.configPath,
         origin,
