@@ -84,6 +84,18 @@ try {
   if ($_.Exception.Message -eq 'INHERITED_ACL' -or
       $_.Exception.Message -eq 'ACL_RULE_COUNT' -or
       $_.Exception.Message -eq 'ACL_CHECK_FAILED') { exit 23 }
+  if ($stage -eq 32) {
+    if ($_.FullyQualifiedErrorId -like 'CouldNotAutoloadMatchingModule*') { exit 43 }
+    if ($_.FullyQualifiedErrorId -like 'CommandNotFoundException*') { exit 40 }
+    $exception = $_.Exception
+    while ($null -ne $exception) {
+      if ($exception -is [System.Management.Automation.CommandNotFoundException]) { exit 40 }
+      if ($exception -is [System.UnauthorizedAccessException] -or
+          $exception -is [System.Security.SecurityException]) { exit 41 }
+      $exception = $exception.InnerException
+    }
+    exit 42
+  }
   exit $stage
 }
 `;

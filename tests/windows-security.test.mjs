@@ -47,6 +47,11 @@ test("private Windows path helper runs fixed PowerShell with paths as arguments"
     assert.match(secureCommand, /\$acl\.SetOwner\(\$identity\)/);
     assert.match(secureCommand, /MISSING_USER_SID'\) \{ exit 21 \}/);
     assert.match(secureCommand, /INHERITED_ACL' -or[\s\S]+ACL_RULE_COUNT' -or[\s\S]+ACL_CHECK_FAILED'\) \{ exit 23 \}/);
+    assert.match(secureCommand, /FullyQualifiedErrorId -like 'CouldNotAutoloadMatchingModule\*'\) \{ exit 43 \}/);
+    assert.match(secureCommand, /FullyQualifiedErrorId -like 'CommandNotFoundException\*'\) \{ exit 40 \}/);
+    assert.match(secureCommand, /System\.UnauthorizedAccessException[\s\S]+System\.Security\.SecurityException\]\) \{ exit 41 \}/);
+    assert.match(secureCommand, /\$stage -eq 32/);
+    assert.match(secureCommand, /exit 42/);
     assert.match(secureCommand, /\$acl\.GetAccessRules\(\$true, \$false, \[System\.Security\.Principal\.SecurityIdentifier\]\)/);
     assert.doesNotMatch(secureCommand, /\$acl\.Access/);
     for (const stage of [30, 31, 32, 33, 34, 35, 36]) assert.match(secureCommand, new RegExp(`\\$stage = ${stage}`));
@@ -71,6 +76,10 @@ test("private Windows path helper refuses reparse points and failed ACL verifica
       [34, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [35, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [36, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [40, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [41, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [42, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [43, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [1, "WINDOWS_SECURITY_COMMAND_FAILED"],
     ]) {
       await assert.rejects(assertWindowsPrivatePath(path, {

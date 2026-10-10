@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -33,6 +33,7 @@ async function assertPrivateTree(path) {
 }
 
 try {
+  if (process.platform === "win32") await mkdir(env.LOCALAPPDATA);
   const first = prepare();
   assert.equal(first.minimumNodeVersion, "22.22.2");
   assert.equal(first.runtimeProtocol, 2);

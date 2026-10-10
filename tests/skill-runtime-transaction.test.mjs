@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { skillArchive } from './fixtures/skill-archive.mjs';
 import { installBridge } from '../skills/weixin-channels-video/scripts/bridge-install.mjs';
@@ -242,7 +242,8 @@ test('Windows release preparation protects the shared bridge storage root', {
     } finally {
       process.stdout.write = originalWrite;
     }
-    assert.equal(JSON.parse(output.join('')).version, '0.6.0');
+    const prepared = JSON.parse(output.join(''));
+    assert.equal(prepared.version, '0.6.0');
     await assertWindowsPrivatePath(appSupportRoot, { directory: true });
 
     const chromeUserDataDir = join(tempRoot, 'Chrome User Data');
@@ -257,6 +258,7 @@ test('Windows release preparation protects the shared bridge storage root', {
       appSupportDir: appSupportRoot,
       chromeUserDataDir,
       nodeExecutable: process.execPath,
+      nativeHostSource: join(dirname(prepared.runtimeCLI), 'native-host.mjs'),
       platform: 'win32',
       registry: {
         async read() { return registeredPath; },
