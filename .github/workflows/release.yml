@@ -30,6 +30,7 @@ jobs:
       - run: npm test
       # release:package runs the regular build before creating the archives.
       - run: npm run release:package
+      - run: node tests/skill-release-archive-smoke.mjs
       - run: npm run worker:build
       - run: (cd dist/release && sha256sum -c SHA256SUMS)
       - uses: actions/upload-artifact@v4
