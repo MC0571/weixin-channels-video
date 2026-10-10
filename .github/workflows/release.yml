@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - extension/manifest.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cws-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      # release:package runs the regular build before creating the archives.
+      - run: npm run release:package
+      - run: npm run worker:build
+      - run: python3 -m unittest discover -s skills/weixin-channels-video/scripts -p 'test_*.py'
+      - run: (cd dist/release && sha256sum -c SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist/release
+      - name: Read and validate manifest version
+        id: version
+        shell: bash
+        run: |
+          version="$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync("extension/manifest.json", "utf8")).version)')"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,3}$ ]]; then
+            echo "::error::Invalid Chrome extension manifest version"
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Create or verify GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          tag_refs="$(git ls-remote origin "refs/tags/${tag}" "refs/tags/${tag}^{}")"
+          tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/${tag}" '$2 == ref "^{}" { peeled = $1 } $2 == ref { direct = $1 } END { if (peeled != "") print peeled; else if (direct != "") print direct }')"
+          if [[ -n "$tag_sha" && "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag ${tag} already points to a different commit"
+            exit 1
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ -z "$tag_sha" || "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "::error::Existing release ${tag} is not anchored to this workflow commit"
+              exit 1
+            fi
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "Release ${tag}: Chrome extension package and standalone Skill."
+          fi
+
+          assets_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets)"
+          temp_dir="$(mktemp -d "${RUNNER_TEMP}/release-assets.XXXXXX")"
+          for asset in \
+            "dist/release/weixin-channels-video-extension-v${VERSION}.zip" \
+            "dist/release/weixin-channels-video-skill-v${VERSION}.tar.gz" \
+            "dist/release/SHA256SUMS"; do
+            name="${asset##*/}"
+            if jq -e --arg name "$name" '.assets[] | select(.name == $name)' <<<"$assets_json" >/dev/null; then
+              gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$temp_dir"
+              if ! cmp -s "$asset" "$temp_dir/$name"; then
+                echo "::error::Existing release asset ${name} differs from the package for ${GITHUB_SHA}"
+                exit 1
+              fi
+            else
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$asset"
+            fi
+          done
+      - uses: google-github-actions/auth@v3
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+      - name: Upload and submit to the Chrome Web Store
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
+        run: node scripts/chrome-web-store.mjs
