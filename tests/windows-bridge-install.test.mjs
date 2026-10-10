@@ -96,6 +96,8 @@ test("Windows bridge install keeps Unicode and spaces in long paths and stages f
       assert.ok(launcher.includes(`${moduleName}.psd1`));
     }
     assert.match(launcher, /--parent-window=/);
+    assert.match(launcher, /WCV_PARENT_WINDOW=%~2/);
+    assert.match(launcher, /WCV_PARENT_WINDOW_VALUE=%~3/);
     const commandLine = launcher.split("\r\n").find((line) => line.includes("powershell.exe"));
     assert.ok(commandLine.length < 8191);
     assert.doesNotMatch(launcher, /Program Files|桥接/);
@@ -323,40 +325,35 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
     });
     const manifest = JSON.parse(await readFile(installed.hostManifestPath, "utf8"));
     const config = JSON.parse(await readFile(join(appSupportDir, "bridge.json"), "utf8"));
-    const launcher = await readFile(installed.launcherPath, "utf8");
-    const launcherExitReasons = [
-      "bridge metadata validation",
-      "app support directory identity",
-      "bridge config identity",
-      "manifest and extension origin validation",
-      "configured Node executable validation",
-      "Chrome parent-window argument validation",
-      "native host process start",
-    ];
-    let launcherExitIndex = 0;
-    const diagnosticLauncher = launcher.replace(/\bexit 1(?=\s*[;}])/g, () => `exit ${81 + launcherExitIndex++}`);
-    assert.equal(launcherExitIndex, launcherExitReasons.length, "Expected each fixed launcher failure branch to have a diagnostic code.");
-    await writeFile(installed.launcherPath, diagnosticLauncher, "utf8");
     const origin = `chrome-extension://${extensionId}/`;
     const input = Buffer.from([0x00, 0x03, 0x7b, 0xff, 0x00, 0x0d, 0x0a]);
-    const invocation = `""${manifest.path}" ${origin} --parent-window=12345"`;
-    const child = spawnSync("cmd.exe", ["/d", "/s", "/c", invocation], {
-      input,
-      encoding: null,
-      windowsHide: true,
-      windowsVerbatimArguments: true,
-      timeout: 15_000,
-      env: { ...process.env, WCV_CAPTURE: capturePath },
-    });
-    assert.equal(child.error, undefined, child.error?.message);
-    const exitReason = launcherExitReasons[child.status - 81] ?? "native host or launcher process";
-    assert.equal(child.status, 0, `${exitReason}; status ${child.status}; stderr ${child.stderr?.toString("utf8") ?? ""}`);
-    assert.deepEqual(child.stdout, input);
-    assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
-      config.configPath,
-      origin,
-      "--parent-window=12345",
-    ]);
+    const invocations = [
+      { argument: "--parent-window=12345", expected: "--parent-window=12345" },
+      { argument: '"--parent-window=12345"', expected: "--parent-window=12345" },
+      { argument: "--parent-window 12345", expected: "--parent-window=12345" },
+      { argument: "", expected: "--parent-window=0" },
+    ];
+    for (const { argument, expected } of invocations) {
+      const invocation = argument
+        ? `""${manifest.path}" ${origin} ${argument}"`
+        : `""${manifest.path}" ${origin}"`;
+      const child = spawnSync("cmd.exe", ["/d", "/s", "/c", invocation], {
+        input,
+        encoding: null,
+        windowsHide: true,
+        windowsVerbatimArguments: true,
+        timeout: 15_000,
+        env: { ...process.env, WCV_CAPTURE: capturePath },
+      });
+      assert.equal(child.error, undefined, child.error?.message);
+      assert.equal(child.status, 0, child.stderr?.toString("utf8"));
+      assert.deepEqual(child.stdout, input);
+      assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
+        config.configPath,
+        origin,
+        expected,
+      ]);
+    }
   });
 });
 
