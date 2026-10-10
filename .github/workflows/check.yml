@@ -16,12 +16,19 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run build
+      - run: npm run release:package
+      - run: node tests/skill-release-archive-smoke.mjs
       - run: npm run worker:build
       - uses: actions/upload-artifact@v4
         with:
           name: skill-runtime
           path: dist/weixin-channels-video
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/release/*.zip
           if-no-files-found: error
           retention-days: 1
   runtime-node-minimum:
@@ -40,6 +47,11 @@ jobs:
         with:
           name: skill-runtime
           path: dist/weixin-channels-video
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: dist/release
+      - run: node tests/skill-release-archive-smoke.mjs
       - name: Windows security context
         if: runner.os == 'Windows'
         shell: powershell

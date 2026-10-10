@@ -101,6 +101,8 @@ def write_skill_zip(skill_dir, archive_path):
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=False) as archive:
         for path, name in entries:
+            if path.is_dir():
+                name = name.rstrip("/") + "/"
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
             info.compress_type = zipfile.ZIP_STORED
