@@ -323,6 +323,20 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
     });
     const manifest = JSON.parse(await readFile(installed.hostManifestPath, "utf8"));
     const config = JSON.parse(await readFile(join(appSupportDir, "bridge.json"), "utf8"));
+    const launcher = await readFile(installed.launcherPath, "utf8");
+    const launcherExitReasons = [
+      "bridge metadata validation",
+      "app support directory identity",
+      "bridge config identity",
+      "manifest and extension origin validation",
+      "configured Node executable validation",
+      "Chrome parent-window argument validation",
+      "native host process start",
+    ];
+    let launcherExitIndex = 0;
+    const diagnosticLauncher = launcher.replace(/\bexit 1(?=\s*[;}])/g, () => `exit ${81 + launcherExitIndex++}`);
+    assert.equal(launcherExitIndex, launcherExitReasons.length, "Expected each fixed launcher failure branch to have a diagnostic code.");
+    await writeFile(installed.launcherPath, diagnosticLauncher, "utf8");
     const origin = `chrome-extension://${extensionId}/`;
     const input = Buffer.from([0x00, 0x03, 0x7b, 0xff, 0x00, 0x0d, 0x0a]);
     const invocation = `""${manifest.path}" ${origin} --parent-window=12345"`;
@@ -335,7 +349,8 @@ test("Windows launcher preserves stdio frames and the Chrome argv through cmd.ex
       env: { ...process.env, WCV_CAPTURE: capturePath },
     });
     assert.equal(child.error, undefined, child.error?.message);
-    assert.equal(child.status, 0, child.stderr?.toString("utf8"));
+    const exitReason = launcherExitReasons[child.status - 81] ?? "native host or launcher process";
+    assert.equal(child.status, 0, `${exitReason}; status ${child.status}; stderr ${child.stderr?.toString("utf8") ?? ""}`);
     assert.deepEqual(child.stdout, input);
     assert.deepEqual(JSON.parse(await readFile(capturePath, "utf8")), [
       config.configPath,
