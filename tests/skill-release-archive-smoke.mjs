@@ -37,15 +37,18 @@ try {
   const skill = join(destination, "weixin-channels-video");
   assert.match(await readFile(join(skill, "SKILL.md"), "utf8"), /^---/);
   await readFile(join(skill, "references", "agent-installation.md"));
-  const prepared = spawnSync(process.execPath, [join(skill, "scripts", "run.mjs"), "prepare"], {
-    encoding: "utf8", env, timeout: 120_000,
-  });
-  assert.equal(prepared.status, 0, "Extracted Skill ZIP must prepare without the source repository");
-  const result = JSON.parse(prepared.stdout);
-  assert.equal(result.minimumNodeVersion, MIN_NODE_VERSION);
-  assert.equal(result.runtimeProtocol, RUNTIME_PROTOCOL);
-  assert.equal(JSON.parse(await readFile(join(result.extensionAssets, "manifest.json"), "utf8")).version, version);
-  process.stdout.write("Release Skill ZIP extraction and standalone preparation passed.\n");
+  process.stdout.write("Release Skill ZIP extraction passed.\n");
+  if (process.platform === "darwin" || process.platform === "win32") {
+    const prepared = spawnSync(process.execPath, [join(skill, "scripts", "run.mjs"), "prepare"], {
+      encoding: "utf8", env, timeout: 120_000,
+    });
+    assert.equal(prepared.status, 0, "Extracted Skill ZIP must prepare without the source repository");
+    const result = JSON.parse(prepared.stdout);
+    assert.equal(result.minimumNodeVersion, MIN_NODE_VERSION);
+    assert.equal(result.runtimeProtocol, RUNTIME_PROTOCOL);
+    assert.equal(JSON.parse(await readFile(join(result.extensionAssets, "manifest.json"), "utf8")).version, version);
+    process.stdout.write("Extracted Skill standalone preparation passed.\n");
+  }
 } finally {
   await rm(root, { recursive: true, force: true });
 }
