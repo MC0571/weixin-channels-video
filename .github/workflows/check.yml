@@ -27,6 +27,7 @@ jobs:
   runtime-node-minimum:
     needs: check
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}

@@ -33,23 +33,32 @@ $path = $env:WCV_PRIVATE_PATH
 $mode = $env:WCV_PRIVATE_MODE
 $kind = $env:WCV_PRIVATE_KIND
 $newlyCreated = $env:WCV_PRIVATE_NEWLY_CREATED -eq '1'
+$stage = 30
 ${WINDOWS_PRIVATE_PATH_ASSERTION}
 try {
+  $stage = 30
   $attributes = [System.IO.File]::GetAttributes($path)
   if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 20 }
+  $stage = 31
   $token = [System.Security.Principal.WindowsIdentity]::GetCurrent()
   $identity = $token.User
   if ($null -eq $identity) { exit 21 }
+  $stage = 32
   $acl = Get-Acl -LiteralPath $path
   if ($mode -eq 'secure') {
+    $stage = 33
     $currentOwner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($currentOwner -ne $identity.Value) {
       $tokenOwner = $token.Owner
       if (-not $newlyCreated -or $null -eq $tokenOwner -or $currentOwner -ne $tokenOwner.Value) { exit 22 }
       $acl.SetOwner($identity)
     }
+    $stage = 34
     $acl.SetAccessRuleProtection($true, $false)
-    foreach ($entry in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($entry) }
+    $rules = $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])
+    for ($index = 0; $index -lt $rules.Count; $index++) {
+      [void]$acl.RemoveAccessRuleAll($rules[$index])
+    }
     $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
     if ($kind -eq 'directory') {
       $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
@@ -62,8 +71,10 @@ try {
       [System.Security.AccessControl.AccessControlType]::Allow
     )
     $acl.SetAccessRule($rule)
+    $stage = 35
     Set-Acl -LiteralPath $path -AclObject $acl
   }
+  $stage = 36
   Assert-WcvPrivatePath $path $kind
   exit 0
 } catch {
@@ -73,7 +84,7 @@ try {
   if ($_.Exception.Message -eq 'INHERITED_ACL' -or
       $_.Exception.Message -eq 'ACL_RULE_COUNT' -or
       $_.Exception.Message -eq 'ACL_CHECK_FAILED') { exit 23 }
-  exit 26
+  exit $stage
 }
 `;
 

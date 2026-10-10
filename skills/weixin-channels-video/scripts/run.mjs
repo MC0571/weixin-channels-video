@@ -413,9 +413,13 @@ async function ensureCacheRoot() {
     fail("此 Skill 目前支持 macOS 和 Windows。");
   }
   const appCacheRoot = dirname(LEGACY_CACHE_ROOT);
-  await mkdir(appCacheRoot, { recursive: true, mode: 0o700 });
-  const appInfo = await lstat(appCacheRoot);
-  if (!appInfo.isDirectory() || appInfo.isSymbolicLink()) fail("工具缓存目录不安全。");
+  if (process.platform === "win32") {
+    await createOrAssertCacheDirectory(appCacheRoot);
+  } else {
+    await mkdir(appCacheRoot, { recursive: true, mode: 0o700 });
+    const appInfo = await lstat(appCacheRoot);
+    if (!appInfo.isDirectory() || appInfo.isSymbolicLink()) fail("工具缓存目录不安全。");
+  }
   await createOrAssertCacheDirectory(LEGACY_CACHE_ROOT);
   await createOrAssertCacheDirectory(CACHE_ROOT);
   if (process.platform === "darwin") {

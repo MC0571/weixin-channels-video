@@ -43,7 +43,7 @@ test('runner declares the tested Node minimum and platform cache roots', () => {
   assert.equal(platformCacheRoot({ platform: 'linux' }), null);
 });
 
-test('runner parses and safely unpacks the packaged USTAR gzip resource', async () => {
+test('runner parses and safely unpacks the packaged USTAR gzip resource', async (t) => {
   const archive = validArchive();
   const members = parseSkillArchive(archive);
   assert.equal(members.get('weixin-channels-video/scripts/cli.mjs')?.data.toString(), 'export const version = 1;');
@@ -51,7 +51,12 @@ test('runner parses and safely unpacks the packaged USTAR gzip resource', async 
   const parent = await mkdtemp(join(tmpdir(), 'skill-runtime-'));
   try {
     const destination = join(parent, 'payload');
-    await unpackSkillArchive(archive, destination);
+    try {
+      await unpackSkillArchive(archive, destination);
+    } catch (error) {
+      if (Number.isInteger(error.exitCode)) t.diagnostic(`Windows security command exit: ${error.exitCode}`);
+      throw error;
+    }
     assert.equal(
       await readFile(join(destination, 'weixin-channels-video/scripts/cli.mjs'), 'utf8'),
       'export const version = 1;',

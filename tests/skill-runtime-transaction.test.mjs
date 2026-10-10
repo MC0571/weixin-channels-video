@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { skillArchive } from './fixtures/skill-archive.mjs';
+import { installBridge } from '../skills/weixin-channels-video/scripts/bridge-install.mjs';
 import { assertWindowsPrivatePath, secureWindowsPath } from '../skills/weixin-channels-video/scripts/windows-security.mjs';
 
 const supportedPlatform = process.platform === 'darwin' || process.platform === 'win32';
@@ -191,6 +192,85 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
     process.stdout.write = originalWrite;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = originalLocalAppData;
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Windows release preparation protects the shared bridge storage root', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'skill-runtime-shared-root-'));
+  const localAppData = join(tempRoot, 'LocalAppData');
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  await mkdir(localAppData);
+  process.env.LOCALAPPDATA = localAppData;
+
+  try {
+    const runtimeUrl = new URL('../skills/weixin-channels-video/scripts/run.mjs', import.meta.url);
+    runtimeUrl.searchParams.set('fixture', 'shared-bridge-storage-root');
+    const runtime = await import(runtimeUrl);
+    const appSupportRoot = join(localAppData, 'weixin-channels-video');
+    await assert.rejects(lstat(appSupportRoot), { code: 'ENOENT' });
+
+    const activeRelease = makeRelease('0.6.0');
+    const releasesApi = 'https://api.github.com/repos/MC0571/weixin-channels-video/releases/latest';
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (url === releasesApi) {
+        return response(JSON.stringify(activeRelease.release), 'application/vnd.github+json');
+      }
+      if (url === activeRelease.baseUrl + '/SHA256SUMS') {
+        return response(activeRelease.checksums, 'text/plain');
+      }
+      if (url === activeRelease.baseUrl + '/' + activeRelease.archiveName) {
+        return response(activeRelease.archive, 'application/gzip');
+      }
+      throw new Error('Unexpected shared-root runtime test URL: ' + url);
+    };
+
+    const output = [];
+    process.stdout.write = (chunk) => {
+      output.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+      return true;
+    };
+    try {
+      assert.equal(await runtime.run(['prepare']), 0);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+    assert.equal(JSON.parse(output.join('')).version, '0.6.0');
+    await assertWindowsPrivatePath(appSupportRoot, { directory: true });
+
+    const chromeUserDataDir = join(tempRoot, 'Chrome User Data');
+    await mkdir(join(chromeUserDataDir, 'Default'), { recursive: true });
+    await writeFile(join(chromeUserDataDir, 'Local State'), JSON.stringify({
+      profile: { info_cache: { Default: { name: 'Default' } } },
+    }), { flag: 'wx' });
+    let registeredPath = null;
+    const installed = await installBridge({
+      extensionId: 'a'.repeat(32),
+      profile: 'Default',
+      appSupportDir: appSupportRoot,
+      chromeUserDataDir,
+      nodeExecutable: process.execPath,
+      platform: 'win32',
+      registry: {
+        async read() { return registeredPath; },
+        async write(_key, path) { registeredPath = path; },
+        async remove(_key, expectedPath) {
+          if (registeredPath === expectedPath) registeredPath = null;
+        },
+      },
+    });
+    assert.equal(installed.config.appSupportDir, appSupportRoot);
+    assert.equal(registeredPath, installed.hostManifestPath);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
     if (originalLocalAppData === undefined) delete process.env.LOCALAPPDATA;
     else process.env.LOCALAPPDATA = originalLocalAppData;
     await rm(tempRoot, { recursive: true, force: true });

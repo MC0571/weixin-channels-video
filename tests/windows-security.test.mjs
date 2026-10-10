@@ -47,6 +47,10 @@ test("private Windows path helper runs fixed PowerShell with paths as arguments"
     assert.match(secureCommand, /\$acl\.SetOwner\(\$identity\)/);
     assert.match(secureCommand, /MISSING_USER_SID'\) \{ exit 21 \}/);
     assert.match(secureCommand, /INHERITED_ACL' -or[\s\S]+ACL_RULE_COUNT' -or[\s\S]+ACL_CHECK_FAILED'\) \{ exit 23 \}/);
+    assert.match(secureCommand, /\$acl\.GetAccessRules\(\$true, \$false, \[System\.Security\.Principal\.SecurityIdentifier\]\)/);
+    assert.doesNotMatch(secureCommand, /\$acl\.Access/);
+    for (const stage of [30, 31, 32, 33, 34, 35, 36]) assert.match(secureCommand, new RegExp(`\\$stage = ${stage}`));
+    assert.match(secureCommand, /exit \$stage/);
     assert.doesNotMatch(secureCommand, /TakeOwnership/);
   });
 });
@@ -60,7 +64,14 @@ test("private Windows path helper refuses reparse points and failed ACL verifica
       [21, "WINDOWS_SECURITY_IDENTITY_UNAVAILABLE"],
       [22, "WINDOWS_PATH_OWNER_MISMATCH"],
       [23, "WINDOWS_ACL_CHECK_FAILED"],
-      [26, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [30, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [31, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [32, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [33, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [34, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [35, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [36, "WINDOWS_SECURITY_COMMAND_FAILED"],
+      [1, "WINDOWS_SECURITY_COMMAND_FAILED"],
     ]) {
       await assert.rejects(assertWindowsPrivatePath(path, {
         platform: "win32",
@@ -70,6 +81,12 @@ test("private Windows path helper refuses reparse points and failed ACL verifica
         error.message === code && !error.message.includes(path) &&
         !error.message.includes("raw PowerShell detail"));
     }
+    await assert.rejects(assertWindowsPrivatePath(path, {
+      platform: "win32",
+      env: { SystemRoot: "C:\\Windows" },
+      spawnSyncImpl: () => ({ error: Object.assign(new Error("private error"), { code: "EACCES" }), status: null }),
+    }), (error) => error.code === "WINDOWS_SECURITY_COMMAND_FAILED" &&
+      error.exitCode === null && error.message === "WINDOWS_SECURITY_COMMAND_FAILED");
     assert.equal(await inspectWindowsPathSecurity(path, {
       platform: "win32",
       env: { SystemRoot: "C:\\Windows" },
