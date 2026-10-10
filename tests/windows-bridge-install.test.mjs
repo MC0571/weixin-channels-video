@@ -92,6 +92,9 @@ test("Windows bridge install keeps Unicode and spaces in long paths and stages f
     assert.match(launcher, /Get-Content[^\r\n]+-Encoding UTF8/);
     assert.match(launcher, /Assert-WcvPrivatePath/);
     assert.match(launcher, /GetFile\(\$actualConfig\)\.ShortPath/);
+    for (const moduleName of ["Microsoft.PowerShell.Security", "Microsoft.PowerShell.Management", "Microsoft.PowerShell.Utility"]) {
+      assert.ok(launcher.includes(`${moduleName}.psd1`));
+    }
     assert.match(launcher, /--parent-window=/);
     const commandLine = launcher.split("\r\n").find((line) => line.includes("powershell.exe"));
     assert.ok(commandLine.length < 8191);
@@ -132,6 +135,35 @@ test("Windows default registry adapter checks both Chrome registry views", async
     assert.ok(registryCommands.length >= 3);
     assert.ok(registryCommands.every((command) => command.includes("[Microsoft.Win32.RegistryView]::Registry32")));
     assert.ok(registryCommands.every((command) => command.includes("[Microsoft.Win32.RegistryView]::Registry64")));
+    assert.ok(registryCommands.every((command) => command.indexOf("Microsoft.PowerShell.Utility.psd1") < command.indexOf("if ($mode -eq 'read')")));
+  });
+});
+
+test("Windows short-path resolution imports the fixed Utility manifest", async () => {
+  await withTempDir(async (tempRoot) => {
+    const chromeUserDataDir = await createChromeProfile(tempRoot);
+    const appSupportDir = join(tempRoot, "private!bridge");
+    const commands = [];
+    const options = installOptions({
+      root: tempRoot,
+      chromeUserDataDir,
+      appSupportDir,
+      registry: registryMock(),
+      securityCalls: [],
+      shortPathResolver: undefined,
+    });
+    options.powershellSpawnSyncImpl = (_executable, args, settings) => {
+      commands.push(args[3]);
+      const path = settings.env.WCV_SHORT_PATH;
+      const stdout = path.endsWith("native-host-launcher.cmd")
+        ? "C:\\WCV~1\\native-host-launcher.cmd\n"
+        : "C:\\WCV~1\n";
+      return { status: 0, stdout };
+    };
+
+    await installBridge(options);
+    assert.equal(commands.length, 2);
+    assert.ok(commands.every((command) => command.indexOf("Microsoft.PowerShell.Utility.psd1") < command.indexOf("New-Object -ComObject")));
   });
 });
 

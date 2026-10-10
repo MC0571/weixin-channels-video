@@ -125,7 +125,7 @@ $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
 )
 [Console]::Error.WriteLine('READY')
 [Console]::Error.Flush()
-while ($true) { Start-Sleep -Seconds 1 }
+while ($true) { [System.Threading.Thread]::Sleep(1000) }
 `;
   const child = spawn(windowsPowerShellPath(), ["-NoProfile", "-NonInteractive", "-Command", command], {
     shell: false,

@@ -2,6 +2,17 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
+const WINDOWS_BUILTIN_MODULES = new Set([
+  "Microsoft.PowerShell.Management",
+  "Microsoft.PowerShell.Security",
+  "Microsoft.PowerShell.Utility",
+]);
+
+export function windowsPowerShellBuiltinModuleImport(moduleName) {
+  if (!WINDOWS_BUILTIN_MODULES.has(moduleName)) throw new Error("WINDOWS_SECURITY_UNAVAILABLE");
+  return `Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules', '${moduleName}', '${moduleName}.psd1')) -ErrorAction Stop`;
+}
+
 export const WINDOWS_PRIVATE_PATH_ASSERTION = String.raw`
 function Assert-WcvPrivatePath($path, $kind) {
   $attributes = [System.IO.File]::GetAttributes($path);
@@ -33,9 +44,10 @@ $path = $env:WCV_PRIVATE_PATH
 $mode = $env:WCV_PRIVATE_MODE
 $kind = $env:WCV_PRIVATE_KIND
 $newlyCreated = $env:WCV_PRIVATE_NEWLY_CREATED -eq '1'
-$stage = 30
+$stage = 29
 ${WINDOWS_PRIVATE_PATH_ASSERTION}
 try {
+  ${windowsPowerShellBuiltinModuleImport("Microsoft.PowerShell.Security")}
   $stage = 30
   $attributes = [System.IO.File]::GetAttributes($path)
   if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 20 }

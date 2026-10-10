@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, win32 } from "node:path";
 import { BRIDGE_ERROR_MESSAGES, SESSION_ID_PATTERN } from "../../../src/native-messaging.mjs";
-import { windowsPowerShellPath } from "./windows-security.mjs";
+import { windowsPowerShellBuiltinModuleImport, windowsPowerShellPath } from "./windows-security.mjs";
 import { BridgeError, waitForBridge } from "./bridge-client.mjs";
 import { inspectBridgeComponents } from "./bridge-install.mjs";
 import { MIN_NODE_VERSION, RUNTIME_PROTOCOL } from "./runtime-support.mjs";
@@ -11,7 +11,7 @@ import { defaultChromeUserDataDir, inspectChromeProfile, selectChromeProfile } f
 
 const CHROME_BUNDLE_ID = "com.google.Chrome";
 const MINIMUM_CHROME_MAJOR = 116;
-const WINDOWS_CHROME_VERSION_COMMAND = String.raw`$ErrorActionPreference='Stop'; $path=$env:WCV_CHROME_EXE; if(-not [System.IO.File]::Exists($path)){ exit 10 }; try { $version=(Get-Item -LiteralPath $path).VersionInfo.ProductVersion; if(-not $version){ exit 11 }; [Console]::Out.WriteLine($version); exit 0 } catch { exit 11 }`;
+const WINDOWS_CHROME_VERSION_COMMAND = String.raw`$ErrorActionPreference='Stop'; $path=$env:WCV_CHROME_EXE; if(-not [System.IO.File]::Exists($path)){ exit 10 }; try { ${windowsPowerShellBuiltinModuleImport("Microsoft.PowerShell.Management")}; $version=(Get-Item -LiteralPath $path).VersionInfo.ProductVersion; if(-not $version){ exit 11 }; [Console]::Out.WriteLine($version); exit 0 } catch { exit 11 }`;
 
 async function readPackagedRuntimeMetadata() {
   try {

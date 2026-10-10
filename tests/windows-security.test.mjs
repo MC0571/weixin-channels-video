@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertWindowsPrivatePath, inspectWindowsPathSecurity, secureWindowsPath } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
+import { assertWindowsPrivatePath, inspectWindowsPathSecurity, secureWindowsPath, windowsPowerShellBuiltinModuleImport } from "../skills/weixin-channels-video/scripts/windows-security.mjs";
 
 async function withTempDir(callback) {
   const root = await mkdtemp(join(tmpdir(), "wcv-acl-test-"));
@@ -42,6 +42,10 @@ test("private Windows path helper runs fixed PowerShell with paths as arguments"
     assert.equal(calls[0].options.shell, false);
     assert.equal(calls[0].options.timeout, 5_000);
     const secureCommand = calls[0].args[3];
+    const securityImport = windowsPowerShellBuiltinModuleImport("Microsoft.PowerShell.Security");
+    assert.ok(secureCommand.indexOf(securityImport) < secureCommand.indexOf("$stage = 30"));
+    assert.ok(secureCommand.indexOf("$stage = 30") < secureCommand.indexOf("$stage = 32"));
+    assert.match(securityImport, /\$PSHOME, 'Modules', 'Microsoft\.PowerShell\.Security', 'Microsoft\.PowerShell\.Security\.psd1'/);
     assert.ok(secureCommand.indexOf("$currentOwner = $acl.GetOwner") < secureCommand.indexOf("Set-Acl -LiteralPath"));
     assert.match(secureCommand, /if \(-not \$newlyCreated -or \$null -eq \$tokenOwner -or \$currentOwner -ne \$tokenOwner\.Value\) \{ exit 22 \}/);
     assert.match(secureCommand, /\$acl\.SetOwner\(\$identity\)/);
@@ -69,6 +73,7 @@ test("private Windows path helper refuses reparse points and failed ACL verifica
       [21, "WINDOWS_SECURITY_IDENTITY_UNAVAILABLE"],
       [22, "WINDOWS_PATH_OWNER_MISMATCH"],
       [23, "WINDOWS_ACL_CHECK_FAILED"],
+      [29, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [30, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [31, "WINDOWS_SECURITY_COMMAND_FAILED"],
       [32, "WINDOWS_SECURITY_COMMAND_FAILED"],
@@ -110,6 +115,20 @@ test("private Windows path helper refuses reparse points and failed ACL verifica
       spawnSyncImpl: successfulPowerShell([]),
     }), /WINDOWS_PATH_UNSAFE/);
   });
+});
+
+test("PowerShell builtin module imports are fixed to Windows PowerShell manifests", () => {
+  for (const moduleName of [
+    "Microsoft.PowerShell.Management",
+    "Microsoft.PowerShell.Security",
+    "Microsoft.PowerShell.Utility",
+  ]) {
+    assert.equal(
+      windowsPowerShellBuiltinModuleImport(moduleName),
+      `Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules', '${moduleName}', '${moduleName}.psd1')) -ErrorAction Stop`,
+    );
+  }
+  assert.throws(() => windowsPowerShellBuiltinModuleImport("Microsoft.PowerShell.Core"), { message: "WINDOWS_SECURITY_UNAVAILABLE" });
 });
 
 test("secure helper refuses an existing non-user-owned directory without mutation", async () => {

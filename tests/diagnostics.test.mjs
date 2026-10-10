@@ -238,6 +238,7 @@ test("Windows Chrome discovery checks known installation paths and records suppo
   assert.equal(defaultWrapperResult.installation, "installed");
   assert.equal(defaultCalls[0].env.WCV_CHROME_EXE, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe");
   assert.equal(defaultCalls[0].args[3].includes("$env:WCV_CHROME_EXE"), true);
+  assert.ok(defaultCalls[0].args[3].indexOf("Microsoft.PowerShell.Management.psd1") < defaultCalls[0].args[3].indexOf("Get-Item -LiteralPath"));
 });
 
 test("Windows Chrome launch passes long profile paths as argv without a shell", async () => {
