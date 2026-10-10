@@ -78,11 +78,12 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
   skip: !supportedPlatform,
 }, async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), 'skill-runtime-transaction-'));
+  const localAppData = join(tempRoot, 'LocalAppData');
   const originalHome = process.env.HOME;
   const originalLocalAppData = process.env.LOCALAPPDATA;
   const originalFetch = globalThis.fetch;
   const originalWrite = process.stdout.write;
-  if (process.platform === 'win32') process.env.LOCALAPPDATA = join(tempRoot, 'LocalAppData');
+  if (process.platform === 'win32') process.env.LOCALAPPDATA = localAppData;
   else process.env.HOME = tempRoot;
 
   try {
@@ -95,8 +96,9 @@ test('Release preparation migrates legacy assets and rolls back checksum, protoc
     const oldManifest = join(oldExtension, 'manifest.json');
     const legacyMarker = join(legacyRoot, 'current.json');
     if (process.platform === 'win32') {
-      await mkdir(join(tempRoot, 'LocalAppData', 'weixin-channels-video'), { recursive: true });
-      for (const directory of [legacyRoot, versionRoot, assetsRoot, oldExtension]) {
+      await mkdir(localAppData);
+      const appCacheRoot = join(localAppData, 'weixin-channels-video');
+      for (const directory of [appCacheRoot, legacyRoot, versionRoot, assetsRoot, oldExtension]) {
         await mkdir(directory, { recursive: false });
         await secureWindowsPath(directory, { directory: true, newlyCreated: true });
       }
